@@ -1,0 +1,1 @@
+-incremental -o "sim/tb_core_sim" "work.tb_core" 

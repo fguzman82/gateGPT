@@ -1,0 +1,25 @@
+// Auto-generated memory map + opcodes. Do not edit.
+localparam integer NINSTR = 77;
+localparam [9:0] A_KC = 10'd0;
+localparam [9:0] A_VC = 10'd384;
+localparam [9:0] A_TMP = 10'd768;
+localparam [9:0] A_XN = 10'd792;
+localparam [9:0] A_QV = 10'd816;
+localparam [9:0] A_AO = 10'd840;
+localparam [9:0] A_WOT = 10'd0;
+localparam [9:0] A_X1 = 10'd24;
+localparam [9:0] A_XN2 = 10'd48;
+localparam [9:0] A_HID = 10'd72;
+localparam [9:0] A_H2T = 10'd168;
+localparam [9:0] A_X2 = 10'd192;
+localparam [9:0] A_XF = 10'd216;
+localparam [9:0] A_LOG = 10'd240;
+localparam [3:0] OP_NOP = 4'd0;
+localparam [3:0] OP_EMBED = 4'd1;
+localparam [3:0] OP_NORM = 4'd2;
+localparam [3:0] OP_MATV = 4'd3;
+localparam [3:0] OP_ATTN = 4'd4;
+localparam [3:0] OP_VADD = 4'd5;
+localparam [3:0] OP_RELU = 4'd6;
+localparam [3:0] OP_SAMPLE = 4'd7;
+localparam [3:0] OP_HALT = 4'd8;

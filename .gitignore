@@ -1,0 +1,40 @@
+# ISE 14.7 / iSim build artifacts
+*.xise
+*.ngc
+*.ngd
+*.ncd
+*.bit
+*.twr
+*.syr
+*.mrp
+*.par
+*.pad
+*.log
+*.lso
+*.xrpt
+*.html
+*.xmsgs
+_xmsgs/
+xst/
+xst_tmp/
+isim/
+work/
+xlnx_auto_*/
+iseconfig/
+_ngo/
+*.cmd_log
+*.bld
+*.drc
+*.pcf
+*.ptwx
+*.unroutes
+*.xpi
+*.stx
+
+# iSim compiled binaries / waveform dumps
+sim/*_sim
+*.wdb
+
+# Python
+__pycache__/
+*.pyc

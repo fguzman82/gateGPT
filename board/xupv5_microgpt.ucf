@@ -1,0 +1,63 @@
+# ============================================================================
+#  XUPV5 / ML509 (Virtex-5 XC5VLX110T-1FF1136) constraints for xupv5_microgpt_top
+# ============================================================================
+#
+#  Pin LOCs/IOSTANDARDs taken from the ML505/506/509 master constraints (same
+#  FF1136 package / board family as the XUPV5-LX110T). Source:
+#  https://github.com/hdl/constraints  (board/ML505/*.ucf).
+#
+#  VERIFY before programming a real board:
+#   - clk_100 (AH15) is the X1 *socket* user clock -- confirm a 100 MHz oscillator
+#     is populated there on your XUPV5; otherwise use another source + adjust the DCM.
+#   - The character LCD shares its data lines with the SystemACE/CompactFlash bus.
+#     Since this design doesn't instantiate SystemACE the pins are free, but make
+#     sure nothing else drives them.
+#   - IOSTANDARDs follow each pin's bank voltage (do NOT blanket-set them).
+
+# ---- clock: 100 MHz user clock (X1 socket), drives the DCM -> core @100 MHz ----
+NET "clk_100" TNM_NET = clk_100;
+TIMESPEC TS_clk_100 = PERIOD "clk_100" 10 ns HIGH 50%;   # 100 MHz osc; core = DCM CLKFX x4/5 = 80 MHz (12.5 ns, auto-derived)
+NET "clk_100" LOC = "AH15" | IOSTANDARD = LVCMOS33;
+
+# ---- push buttons (active high; cursor buttons North/Center) --------------
+# RTL uses active-high reset/start, so we use the active-high cursor buttons
+# (not CPU_RESET at E9, which is active-low and would need an inversion).
+NET "rst_btn"   LOC = "U8"  | IOSTANDARD = LVCMOS18;   # GPIO_Button_North
+NET "start_btn" LOC = "AJ6" | IOSTANDARD = LVCMOS18;   # GPIO_Button_Center
+
+# ---- rotary encoder (throttle): active high, 1.8V bank, async (TIG) --------
+NET "rot_a"    LOC = "AH30" | IOSTANDARD = LVCMOS18;   # GPIO_Rotary_IncA
+NET "rot_b"    LOC = "AG30" | IOSTANDARD = LVCMOS18;   # GPIO_Rotary_IncB
+NET "rot_push" LOC = "AH29" | IOSTANDARD = LVCMOS18;   # GPIO_Rotary_Button
+NET "rot_a"    TIG;
+NET "rot_b"    TIG;
+NET "rot_push" TIG;
+
+# ---- 8 DIP switches (active high, 1.8V bank) ------------------------------
+NET "dip_sw<0>" LOC = "U25"  | IOSTANDARD = LVCMOS18;
+NET "dip_sw<1>" LOC = "AG27" | IOSTANDARD = LVCMOS18;
+NET "dip_sw<2>" LOC = "AF25" | IOSTANDARD = LVCMOS18;
+NET "dip_sw<3>" LOC = "AF26" | IOSTANDARD = LVCMOS18;
+NET "dip_sw<4>" LOC = "AE27" | IOSTANDARD = LVCMOS18;
+NET "dip_sw<5>" LOC = "AE26" | IOSTANDARD = LVCMOS18;
+NET "dip_sw<6>" LOC = "AC25" | IOSTANDARD = LVCMOS18;
+NET "dip_sw<7>" LOC = "AC24" | IOSTANDARD = LVCMOS18;
+
+# ---- 8 status LEDs (mixed bank voltages -> per-pin IOSTANDARD) ------------
+NET "led<0>" LOC = "H18"  | IOSTANDARD = LVCMOS25;   # DS17
+NET "led<1>" LOC = "L18"  | IOSTANDARD = LVCMOS25;   # DS16
+NET "led<2>" LOC = "G15"  | IOSTANDARD = LVCMOS25;   # DS15
+NET "led<3>" LOC = "AD26" | IOSTANDARD = LVCMOS18;   # DS13 (level-shifted)
+NET "led<4>" LOC = "G16"  | IOSTANDARD = LVCMOS25;   # DS14
+NET "led<5>" LOC = "AD25" | IOSTANDARD = LVCMOS18;   # DS12 (level-shifted)
+NET "led<6>" LOC = "AD24" | IOSTANDARD = LVCMOS18;   # DS11 (level-shifted)
+NET "led<7>" LOC = "AE24" | IOSTANDARD = LVCMOS18;   # DS10 (level-shifted)
+
+# ---- 16x2 character LCD (HD44780/ST7066U, 4-bit). lcd_db[3:0] = DB[7:4]. ----
+NET "lcd_db<0>" LOC = "T9"   | IOSTANDARD = LVCMOS25;   # LCD_DB4
+NET "lcd_db<1>" LOC = "G7"   | IOSTANDARD = LVCMOS25;   # LCD_DB5
+NET "lcd_db<2>" LOC = "G6"   | IOSTANDARD = LVCMOS25;   # LCD_DB6
+NET "lcd_db<3>" LOC = "T11"  | IOSTANDARD = LVCMOS25;   # LCD_DB7
+NET "lcd_rs"    LOC = "J17"  | IOSTANDARD = LVCMOS25;   # LCD_RS
+NET "lcd_rw"    LOC = "AC10" | IOSTANDARD = LVCMOS25;   # LCD_RW
+NET "lcd_e"     LOC = "AC9"  | IOSTANDARD = LVCMOS25;   # LCD_E
