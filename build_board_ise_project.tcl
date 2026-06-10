@@ -1,4 +1,4 @@
-# Genera microgpt_v5_board.xise para construir el BITSTREAM de placa en ISE 14.7.
+# Genera microgpt_fpga_board.xise para construir el BITSTREAM de placa en ISE 14.7.
 # Dispositivo: XC5VLX110T-1 FF1136 (placa XUPV5-LX110T)
 # Top: xupv5_microgpt_top (board top: core pipelined + name_generator + LCD + DCM@100MHz)
 #
@@ -9,7 +9,7 @@
 # base = carpeta donde vive este script (robusto, no hardcodea el path del repo)
 set base [file dirname [file normalize [info script]]]
 
-project new $base/microgpt_v5_board.xise
+project new $base/microgpt_fpga_board.xise
 
 # --- dispositivo ---
 project set family  "Virtex5"
@@ -58,4 +58,4 @@ project set "Verilog Include Directories" "$base/core" -process "Synthesize - XS
 # project set "Verilog Macros" "CHIPSCOPE_VIO" -process "Synthesize - XST"
 
 project close
-puts "=== microgpt_v5_board.xise creado en $base (top=xupv5_microgpt_top, 100 MHz) ==="
+puts "=== microgpt_fpga_board.xise creado en $base (top=xupv5_microgpt_top, 100 MHz) ==="
