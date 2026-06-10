@@ -46,10 +46,10 @@ module tb_matvec;
         .busy(mv_busy), .done(mv_done)
     );
 
-    // debug: print acc at each S_WB (st==2), and the done pulse
-    always @(posedge clk) if (!load && u_mv.st == 2'd2)
-        $display("[%0t] WB o=%0d i=%0d acc=%0d sat=%0d",
-                 $time, u_mv.o, u_mv.i, u_mv.acc, $signed(u_mv.sat));
+    // debug: print acc at each S_WB (st==3), and the done pulse
+    always @(posedge clk) if (!load && u_mv.st == 2'd3)
+        $display("[%0t] WB o=%0d acc=%0d sat=%0d",
+                 $time, u_mv.o, u_mv.acc, $signed(u_mv.sat));
     always @(posedge clk) if (mv_done) $display("[%0t] DONE", $time);
 
     integer k, errors;

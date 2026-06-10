@@ -1,8 +1,9 @@
-// Single-position multi-head attention. The query is the last position; it attends
-// to all BLOCK cached positions (causal-correct for the last token, no mask). Per
-// head: score = scale * (q . k); softmax via max-subtract + exp + sum; output =
-// sum(e*v) / sum(e) (truncating divide). Bit-exact with QModel.logits_last.
-// Reads q/K/V from vmem regions, writes the attention output vector to O_BASE.
+// Single-position multi-head attention with a REGISTERED vmem read (1-cycle latency,
+// read-ahead). Per head: load the query slice, score = scale*(q.k), softmax via
+// max-subtract + exp + sum, output = sum(e*v)/sum(e) (truncating divide). Each vmem
+// read loop presents the address one cycle before consuming the data; a delayed index
+// (x_d) tags which element the just-arrived data belongs to. Bit-exact with
+// QModel.attn_debug.
 module attn #(
     parameter integer N_EMBED  = 24,
     parameter integer N_HEAD   = 4,
@@ -26,30 +27,43 @@ module attn #(
     output reg         busy,
     output reg         done
 );
-    localparam [2:0] P_IDLE=0, P_QLOAD=1, P_SCORE=2, P_EXP=3, P_WSUM=4, P_DIV=5, P_NEXTH=6;
-    reg [2:0]  ph;
-    reg [3:0]  h;             // head index
-    reg [4:0]  s;             // context position
-    reg [3:0]  d;             // within-head dim
-    reg [9:0]  hbase;         // h*HEAD_DIM
-    reg [9:0]  soff;          // s*N_EMBED
+    localparam [3:0] P_IDLE=0, P_QLOAD=1, P_SCORE=2, P_EXP=3, P_WSUM=4, P_WDIV=5, P_NEXTH=6;
+    reg [3:0]  ph;
+    reg [3:0]  h;
+    reg [9:0]  hbase;
+    reg [4:0]  s, d;             // feed indices (s = context pos, d = within-head dim)
+    reg [4:0]  s_d, d_d;         // delayed: index of the data valid THIS cycle
+    reg [9:0]  soff;             // s*N_EMBED for the presented s
+    reg        feeding, vld;
 
-    reg signed [15:0] qreg [0:15];   // current head's query slice (HEAD_DIM used)
-    reg signed [15:0] score [0:15];  // per-position scores
-    reg [15:0]        ev [0:15];     // per-position exp weights
+    reg signed [15:0] qreg [0:HEAD_DIM-1];
+    reg signed [15:0] score [0:BLOCK-1];
+    reg [15:0]        ev [0:BLOCK-1];
     reg signed [15:0] mmax;
     reg [31:0]        sum_e;
     reg signed [47:0] acc;
 
-    // score finalize: scale * sat16( (q.k including the current/last term) >> FRAC )
-    wire signed [47:0] acc_full = acc + $signed(qreg[d]) * $signed(v_rdata);
-    wire signed [47:0] accf_sh = acc_full >>> FRAC;
-    wire signed [15:0] scf1 =
-        (accf_sh >  48'sd32767) ? 16'sd32767 : (accf_sh < -48'sd32768) ? -16'sd32768 : accf_sh[15:0];
-    wire signed [31:0] scfsc = scf1 * attn_scale;
-    wire signed [31:0] scfsc_sh = scfsc >>> FRAC;
-    wire signed [15:0] sc2_next =
-        (scfsc_sh >  32'sd32767) ? 16'sd32767 : (scfsc_sh < -32'sd32768) ? -16'sd32768 : scfsc_sh[15:0];
+    // address presented this cycle (registered into vmem -> data next cycle)
+    always @(*) begin
+        case (ph)
+            P_QLOAD: v_raddr = q_base + hbase + {5'd0, d};
+            P_SCORE: v_raddr = k_base + soff + hbase + {5'd0, d};
+            P_WSUM:  v_raddr = v_base + soff + hbase + {5'd0, d};
+            default: v_raddr = 10'd0;
+        endcase
+    end
+
+    // score scaling: attn_scale * sat16(acc >> FRAC)
+    function signed [15:0] scale_score;
+        input signed [47:0] a;
+        reg signed [47:0] ash; reg signed [15:0] s1; reg signed [31:0] m, msh;
+        begin
+            ash = a >>> FRAC;
+            s1 = (ash > 48'sd32767) ? 16'sd32767 : (ash < -48'sd32768) ? -16'sd32768 : ash[15:0];
+            m = s1 * attn_scale; msh = m >>> FRAC;
+            scale_score = (msh > 32'sd32767) ? 16'sd32767 : (msh < -32'sd32768) ? -16'sd32768 : msh[15:0];
+        end
+    endfunction
 
     // exp(score[s]-max)
     wire signed [16:0] diff = $signed(score[s]) - $signed(mmax);
@@ -57,96 +71,89 @@ module attn #(
     wire signed [15:0] eo;
     exp_unit u_exp (.z(dz), .e(eo));
 
-    // weighted-sum division: |num| / sum_e, sign of num
+    // weighted-sum divide: |acc| / sum_e, sign of acc
     reg         d_start;
-    wire        d_done;
-    wire [47:0] d_quo;
+    wire        d_done;  wire [47:0] d_quo;
     wire [47:0] num_abs = acc[47] ? (~acc + 48'd1) : acc;
     udiv #(.W(48)) u_div (.clk(clk), .resetn(resetn), .start(d_start),
         .num(num_abs), .den({31'd0, sum_e[16:0]}), .busy(), .done(d_done), .quo(d_quo));
     wire signed [47:0] q_signed = acc[47] ? -$signed(d_quo) : $signed(d_quo);
     wire signed [15:0] o_sat =
-        (q_signed >  48'sd32767) ? 16'sd32767 : (q_signed < -48'sd32768) ? -16'sd32768 : q_signed[15:0];
+        (q_signed > 48'sd32767) ? 16'sd32767 : (q_signed < -48'sd32768) ? -16'sd32768 : q_signed[15:0];
+
+    // MAC terms from the just-arrived data
+    wire signed [47:0] kprod = $signed(qreg[d_d[2:0]]) * $signed(v_rdata);          // q.k
+    wire signed [47:0] vprod = $signed({1'b0, ev[s_d[3:0]]}) * $signed(v_rdata);    // e.v
+    wire signed [47:0] kacc  = (d_d == 0) ? kprod : acc + kprod;
+    wire signed [47:0] vacc  = (s_d == 0) ? vprod : acc + vprod;
 
     always @(posedge clk) begin
         if (!resetn) begin
             ph <= P_IDLE; busy <= 0; done <= 0; v_we <= 0; d_start <= 0;
+            feeding <= 0; vld <= 0;
         end else begin
             done <= 0; v_we <= 0; d_start <= 0;
+            s_d <= s; d_d <= d; vld <= feeding;
             case (ph)
                 P_IDLE: if (start) begin
-                    busy <= 1; h <= 0; hbase <= 0; d <= 0; v_raddr <= q_base;
-                    ph <= P_QLOAD;
+                    busy <= 1; h <= 0; hbase <= 0; d <= 0; feeding <= 1; ph <= P_QLOAD;
                 end
-                // load this head's query slice into qreg[0..HEAD_DIM-1]
                 P_QLOAD: begin
-                    qreg[d] <= v_rdata;
-                    if (d == HEAD_DIM - 1) begin
-                        d <= 0; s <= 0; soff <= 0; acc <= 0;
-                        mmax <= -16'sd32768;
-                        v_raddr <= k_base + 0 + hbase + 0;   // k[s=0,d=0]
-                        ph <= P_SCORE;
-                    end else begin
-                        d <= d + 1; v_raddr <= q_base + hbase + (d + 1);
+                    if (vld) qreg[d_d[2:0]] <= v_rdata;
+                    if (feeding) begin
+                        if (d == HEAD_DIM - 1) feeding <= 0;
+                        else d <= d + 1;
+                    end
+                    if (vld && d_d == HEAD_DIM - 1) begin
+                        s <= 0; d <= 0; soff <= 0; acc <= 0; mmax <= -16'sd32768;
+                        feeding <= 1; ph <= P_SCORE;
                     end
                 end
-                // scores: per s, MAC q.k over HEAD_DIM, then scale + track max
                 P_SCORE: begin
-                    acc <= acc + $signed(qreg[d]) * $signed(v_rdata);
-                    if (d == HEAD_DIM - 1) begin
-                        // finalize score[s] using the value that includes this term
-                        // (computed next cycle in P_SCORE2-style: fold here)
-                        score[s] <= sc2_next;
-                        if (sc2_next > mmax) mmax <= sc2_next;
-                        d <= 0; acc <= 0;
-                        if (s == BLOCK - 1) begin
-                            s <= 0; sum_e <= 0; ph <= P_EXP;
-                        end else begin
-                            s <= s + 1; soff <= soff + N_EMBED;
-                            v_raddr <= k_base + (soff + N_EMBED) + hbase + 0;
+                    if (vld) begin
+                        acc <= kacc;
+                        if (d_d == HEAD_DIM - 1) begin
+                            score[s_d[3:0]] <= scale_score(kacc);
+                            if (scale_score(kacc) > mmax) mmax <= scale_score(kacc);
                         end
-                    end else begin
-                        d <= d + 1;
-                        v_raddr <= k_base + soff + hbase + (d + 1);
+                    end
+                    if (feeding) begin
+                        if (d == HEAD_DIM - 1) begin
+                            d <= 0;
+                            if (s == BLOCK - 1) feeding <= 0;
+                            else begin s <= s + 1; soff <= soff + N_EMBED; end
+                        end else d <= d + 1;
+                    end
+                    if (vld && s_d == BLOCK - 1 && d_d == HEAD_DIM - 1) begin
+                        s <= 0; sum_e <= 0; ph <= P_EXP;
                     end
                 end
-                // exp weights + running sum
                 P_EXP: begin
-                    ev[s] <= eo;
-                    sum_e <= sum_e + {15'd0, eo};
+                    ev[s[3:0]] <= eo;
+                    sum_e <= sum_e + {16'd0, eo};
                     if (s == BLOCK - 1) begin
-                        s <= 0; d <= 0; acc <= 0;
-                        v_raddr <= v_base + 0 + hbase + 0;   // v[s=0,d=0]
-                        soff <= 0;
-                        ph <= P_WSUM;
+                        d <= 0; s <= 0; soff <= 0; acc <= 0; feeding <= 1; ph <= P_WSUM;
                     end else s <= s + 1;
                 end
-                // weighted sum: per d, sum_s ev[s]*v[s,d]
                 P_WSUM: begin
-                    acc <= acc + $signed({1'b0, ev[s]}) * $signed(v_rdata);
-                    if (s == BLOCK - 1) begin
-                        d_start <= 1; ph <= P_DIV;            // divide acc / sum_e
-                    end else begin
-                        s <= s + 1; soff <= soff + N_EMBED;
-                        v_raddr <= v_base + (soff + N_EMBED) + hbase + d;
+                    if (vld) begin
+                        acc <= vacc;
+                        if (s_d == BLOCK - 1) begin d_start <= 1; feeding <= 0; ph <= P_WDIV; end
+                    end
+                    if (feeding) begin
+                        if (s == BLOCK - 1) feeding <= 0;
+                        else begin s <= s + 1; soff <= soff + N_EMBED; end
                     end
                 end
-                P_DIV: if (d_done) begin
-                    v_we <= 1; v_waddr <= o_base + hbase + d; v_wdata <= o_sat;
-                    acc <= 0; s <= 0; soff <= 0;
+                P_WDIV: if (d_done) begin
+                    v_we <= 1; v_waddr <= o_base + hbase + {5'd0, d}; v_wdata <= o_sat;
                     if (d == HEAD_DIM - 1) ph <= P_NEXTH;
-                    else begin
-                        d <= d + 1;
-                        v_raddr <= v_base + 0 + hbase + (d + 1);
-                        ph <= P_WSUM;
-                    end
+                    else begin d <= d + 1; s <= 0; soff <= 0; acc <= 0; feeding <= 1; ph <= P_WSUM; end
                 end
                 P_NEXTH: begin
                     if (h == N_HEAD - 1) begin busy <= 0; done <= 1; ph <= P_IDLE; end
                     else begin
-                        h <= h + 1; hbase <= hbase + HEAD_DIM; d <= 0;
-                        v_raddr <= q_base + (hbase + HEAD_DIM) + 0;
-                        ph <= P_QLOAD;
+                        h <= h + 1; hbase <= hbase + HEAD_DIM; d <= 0; feeding <= 1; ph <= P_QLOAD;
                     end
                 end
                 default: ph <= P_IDLE;
