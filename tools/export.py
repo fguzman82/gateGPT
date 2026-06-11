@@ -57,28 +57,19 @@ def main():
     m = QModel(sd, cfg)
 
     sizes = {}
-    sizes["tok_embed"] = write_hex("tok_embed.hex", m.tok)     # 27 x 24
-    sizes["pos_embed"] = write_hex("pos_embed.hex", m.pos)     # 16 x 24
-    sizes["wq"] = write_hex("wq.hex", m.wq)                     # 24 x 24
-    sizes["wk"] = write_hex("wk.hex", m.wk)
-    sizes["wv"] = write_hex("wv.hex", m.wv)
-    sizes["wo"] = write_hex("wo.hex", m.wo)
-    sizes["fc1"] = write_hex("fc1.hex", m.fc1)                  # 96 x 24
-    sizes["fc2"] = write_hex("fc2.hex", m.fc2)                  # 24 x 96
-    sizes["lm"] = write_hex("lm_head.hex", m.lm)               # 27 x 24
+    sizes["tok_embed"] = write_hex("tok_embed.hex", m.tok)     # 27 x 24 (embed reads this)
+    sizes["pos_embed"] = write_hex("pos_embed.hex", m.pos)     # 16 x 24 (embed reads this)
 
-    # wide tiled weight ROMs for the 24-lane parallel matvec (one word = 24 weights)
-    write_tiled_hex("wq_t.hex", m.wq)
-    write_tiled_hex("wk_t.hex", m.wk)
-    write_tiled_hex("wv_t.hex", m.wv)
-    write_tiled_hex("wo_t.hex", m.wo)
-    write_tiled_hex("fc1_t.hex", m.fc1)
-    write_tiled_hex("fc2_t.hex", m.fc2)
-    write_tiled_hex("lm_t.hex", m.lm)
-
-    sizes["g1"] = write_hex("gain1.hex", m.g1.reshape(1, -1))
-    sizes["g2"] = write_hex("gain2.hex", m.g2.reshape(1, -1))
-    sizes["gf"] = write_hex("gainf.hex", m.gf.reshape(1, -1))
+    # tiled weight ROMs for the 24-lane, 2-columns/cycle matvec (one word = 48 weights).
+    # These are the ONLY weight ROMs the RTL loads (wrom reads generated/*_t.hex). The
+    # RMSNorm gains go into core/gains.vh as a combinational function (below), not a ROM.
+    sizes["wq_t"] = write_tiled_hex("wq_t.hex", m.wq)          # 24 x 24
+    sizes["wk_t"] = write_tiled_hex("wk_t.hex", m.wk)
+    sizes["wv_t"] = write_tiled_hex("wv_t.hex", m.wv)
+    sizes["wo_t"] = write_tiled_hex("wo_t.hex", m.wo)
+    sizes["fc1_t"] = write_tiled_hex("fc1_t.hex", m.fc1)       # 96 x 24
+    sizes["fc2_t"] = write_tiled_hex("fc2_t.hex", m.fc2)       # 24 x 96
+    sizes["lm_t"] = write_tiled_hex("lm_t.hex", m.lm)          # 27 x 24
     sizes["exp"] = None
     with open(os.path.join(GEN, "exp_tab.hex"), "w") as f:
         for v in EXP_TAB:
