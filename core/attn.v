@@ -70,11 +70,12 @@ module attn #(
         end
     endfunction
 
-    // exp(score[s]-max)
+    // exp(score[s]-max), pipelined: register the exp input (dz_r), exp the next cycle
+    reg signed [15:0] dz_r;
     wire signed [16:0] diff = $signed(score[s]) - $signed(mmax);
     wire signed [15:0] dz = (diff < -17'sd32768) ? -16'sd32768 : diff[15:0];
     wire signed [15:0] eo;
-    exp_unit u_exp (.z(dz), .e(eo));
+    exp_unit u_exp (.z(dz_r), .e(eo));
 
     // weighted-sum divide: |acc| / sum_e, sign of acc
     reg         d_start;
@@ -119,7 +120,7 @@ module attn #(
                     if (dot_vld) begin
                         score[dot_s[3:0]] <= scale_score(dot_raw);
                         if (scale_score(dot_raw) > mmax) mmax <= scale_score(dot_raw);
-                        if (dot_s == BLOCK - 1) begin s <= 0; sum_e <= 0; ph <= P_EXP; end
+                        if (dot_s == BLOCK - 1) begin s <= 0; sum_e <= 0; feeding <= 1; ph <= P_EXP; end
                     end
                     // stage 1: MAC q.k; register the completed dot product
                     if (vld) begin
@@ -137,11 +138,18 @@ module attn #(
                     end
                 end
                 P_EXP: begin
-                    ev[s[3:0]] <= eo;
-                    sum_e <= sum_e + {16'd0, eo};
-                    if (s == BLOCK - 1) begin
-                        d <= 0; s <= 0; soff <= 0; acc <= 0; feeding <= 1; ph <= P_WSUM;
-                    end else s <= s + 1;
+                    dz_r <= dz;                              // stage 1: register exp input
+                    if (vld) begin                           // stage 2: exp + accumulate
+                        ev[s_d[3:0]] <= eo;
+                        sum_e <= sum_e + {16'd0, eo};
+                        if (s_d == BLOCK - 1) begin
+                            d <= 0; s <= 0; soff <= 0; acc <= 0; feeding <= 1; ph <= P_WSUM;
+                        end
+                    end
+                    if (feeding) begin
+                        if (s == BLOCK - 1) feeding <= 0;
+                        else s <= s + 1;
+                    end
                 end
                 P_WSUM: begin
                     if (vld) begin

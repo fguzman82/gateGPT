@@ -38,11 +38,12 @@ module sampler #(
     wire signed [15:0] scaled_v =
         (scs >  32'sd32767) ? 16'sd32767 : (scs < -32'sd32768) ? -16'sd32768 : scs[15:0];
 
-    // exp(scaled[i]-max)
-    wire signed [16:0] diff = $signed(scaled[i]) - $signed(mmax);
+    // exp(scaled[fi]-max), pipelined: register the exp input (dz_r), exp the next cycle
+    reg signed [15:0] dz_r;
+    wire signed [16:0] diff = $signed(scaled[fi]) - $signed(mmax);
     wire signed [15:0] dz = (diff < -17'sd32768) ? -16'sd32768 : diff[15:0];
     wire signed [15:0] eo;
-    exp_unit u_exp (.z(dz), .e(eo));
+    exp_unit u_exp (.z(dz_r), .e(eo));
 
     // modulo via udiv: the divider already produces the remainder (rng mod total),
     // so no separate q*total multiply is needed.
@@ -75,19 +76,25 @@ module sampler #(
                         else fi <= fi + 1;
                     end
                     if (vld && fi_d == VOCAB - 1) begin
-                        i <= 0;
-                        if (sample_mode) st <= S_EXP;
+                        if (sample_mode) begin fi <= 0; feeding <= 1; st <= S_EXP; end
                         else begin token <= amax; rng_out <= rng_in;
                                    busy <= 0; done <= 1; st <= S_IDLE; end
                     end
                 end
                 S_EXP: begin
-                    ev[i] <= eo;
-                    total <= total + {16'd0, eo};
-                    if (i == VOCAB - 1) begin
-                        rngs <= rng_in * 32'd1664525 + 32'd1013904223;
-                        st <= S_MOD;
-                    end else i <= i + 1;
+                    dz_r <= dz;                              // stage 1: register exp input
+                    if (vld) begin                           // stage 2: exp + accumulate
+                        ev[fi_d] <= eo;
+                        total <= total + {16'd0, eo};
+                        if (fi_d == VOCAB - 1) begin
+                            rngs <= rng_in * 32'd1664525 + 32'd1013904223;
+                            st <= S_MOD;
+                        end
+                    end
+                    if (feeding) begin
+                        if (fi == VOCAB - 1) feeding <= 0;
+                        else fi <= fi + 1;
+                    end
                 end
                 S_MOD: begin
                     if (!d_start && !d_done) d_start <= 1;

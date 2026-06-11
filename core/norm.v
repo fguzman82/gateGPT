@@ -30,6 +30,7 @@ module norm #(
     reg signed [47:0] ss;
     reg [31:0] scale_q;
     reg signed [15:0] xreg [0:N-1];
+    reg signed [15:0] t1_r, gain_r;          // scale-pass pipeline registers
 
     assign v_raddr = src_base + {3'd0, fi};
     assign g_addr  = fi[5:0];
@@ -47,12 +48,13 @@ module norm #(
     isqrt #(.W(48)) u_sqrt (.clk(clk), .resetn(resetn), .start(s_start),
         .radicand({16'd0, d_num[31:0]}), .busy(), .done(s_done), .root(s_root));
 
-    // scale pass datapath (from local xreg + combinational gain)
+    // scale pass, stage 1: t1 = sat16( x*scale >> FRAC )  (registered into t1_r)
     wire signed [31:0] xs    = $signed(xreg[fi[4:0]]) * $signed(scale_q[15:0]);
     wire signed [31:0] xs_sh = xs >>> FRAC;
     wire signed [15:0] t1 =
         (xs_sh >  32'sd32767) ? 16'sd32767 : (xs_sh < -32'sd32768) ? -16'sd32768 : xs_sh[15:0];
-    wire signed [31:0] tg    = t1 * $signed(g_rdata);
+    // scale pass, stage 2: y = sat16( t1 * gain >> FRAC )  (from registered t1_r/gain_r)
+    wire signed [31:0] tg    = t1_r * gain_r;
     wire signed [31:0] tg_sh = tg >>> FRAC;
     wire signed [15:0] yval =
         (tg_sh >  32'sd32767) ? 16'sd32767 : (tg_sh < -32'sd32768) ? -16'sd32768 : tg_sh[15:0];
@@ -89,12 +91,18 @@ module norm #(
                 end
                 S_DIV2: if (d_done) begin
                     scale_q <= (d_quo > 48'd32767) ? 32'd32767 : d_quo[31:0];
-                    fi <= 0; st <= S_SCALE;
+                    fi <= 0; feeding <= 1; st <= S_SCALE;
                 end
                 S_SCALE: begin
-                    v_we <= 1; v_waddr <= dst_base + {3'd0, fi}; v_wdata <= yval;
-                    if (fi == N - 1) begin busy <= 0; done <= 1; st <= S_IDLE; end
-                    else fi <= fi + 1;
+                    t1_r <= t1; gain_r <= g_rdata;            // stage 1 -> register
+                    if (vld) begin                            // stage 2 -> write
+                        v_we <= 1; v_waddr <= dst_base + {3'd0, fi_d}; v_wdata <= yval;
+                        if (fi_d == N - 1) begin busy <= 0; done <= 1; st <= S_IDLE; end
+                    end
+                    if (feeding) begin
+                        if (fi == N - 1) feeding <= 0;
+                        else fi <= fi + 1;
+                    end
                 end
                 default: st <= S_IDLE;
             endcase
