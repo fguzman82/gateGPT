@@ -96,9 +96,9 @@ class QModel:
         self.attn_scale = q(1.0 / math.sqrt(cfg.head_dim))   # 1/sqrt(head_dim) in Q11
 
     def attn_debug(self, ctx):
-        """Return (qlast[24], k[T,24], v[T,24], attn_out[24]) for a ctx, for RTL testing."""
+        """Return (qlast[24], k[T,24], v[T,24], attn_out[24]) for a ctx (T=len), RTL testing."""
         cfg = self.cfg
-        T, H, D = cfg.block_size, cfg.n_head, cfg.head_dim
+        T, H, D = len(ctx), cfg.n_head, cfg.head_dim
         x = np.empty((T, cfg.n_embed), dtype=np.int64)
         for t in range(T):
             x[t] = np.array([sat16(int(self.tok[ctx[t]][i]) + int(self.pos[t][i]))
@@ -127,9 +127,10 @@ class QModel:
         return qlast, k, v, attn_out
 
     def logits_last(self, ctx):
-        """ctx: list of block_size token ids (left-padded). Returns Q11 logits at last pos."""
+        """ctx: list of token ids (length L<=block_size, absolute positions 0..L-1).
+        Returns Q11 logits at the last position L-1 (matches incremental KV-cache decode)."""
         cfg = self.cfg
-        T, H, D = cfg.block_size, cfg.n_head, cfg.head_dim
+        T, H, D = len(ctx), cfg.n_head, cfg.head_dim
         # embeddings for all positions
         x = np.empty((T, cfg.n_embed), dtype=np.int64)
         for t in range(T):
@@ -176,14 +177,14 @@ def lcg_next(state):
 
 
 def generate(model: QModel, seed, inv_temp_q11, max_len=None, greedy=False):
-    """Generate one name. Returns (token_ids, string)."""
+    """Generate one name incrementally (absolute positions). Returns (token_ids, string)."""
     cfg = model.cfg
-    max_len = max_len or cfg.block_size
+    max_len = max_len or (cfg.block_size - 1)
     rng = seed & 0xFFFFFFFF
-    ctx = [0] * cfg.block_size
+    seq = [0]               # start token '.'
     toks = []
     for _ in range(max_len):
-        logits = model.logits_last(ctx)
+        logits = model.logits_last(seq)
         if greedy:
             nxt = int(np.argmax(logits))
         else:
@@ -204,6 +205,6 @@ def generate(model: QModel, seed, inv_temp_q11, max_len=None, greedy=False):
         if nxt == 0:
             break
         toks.append(nxt)
-        ctx = ctx[1:] + [nxt]
+        seq.append(nxt)                 # incremental append at the next absolute position
     s = "".join(chr(ord("a") + t - 1) for t in toks)
     return toks, s

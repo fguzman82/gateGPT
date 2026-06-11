@@ -8,5 +8,5 @@ localparam integer MLP_HID  = 96;
 localparam integer BLOCK    = 16;
 localparam integer EXP_K    = 16;
 localparam signed [15:0] ATTN_SCALE = 16'sd836;
-// golden sample seed=2 T=0.7: 'saaniah' tokens=[19, 1, 1, 14, 9, 1, 8]
-// golden greedy: 'alexan' tokens=[1, 12, 5, 24, 1, 14]
+// golden sample seed=2 T=0.7: 'rosphod' tokens=[18, 15, 19, 16, 8, 15, 4]
+// golden greedy: 'alaya' tokens=[1, 12, 1, 25, 1]
