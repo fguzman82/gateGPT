@@ -73,12 +73,14 @@ module microgpt_core (
     grom u_grom (.sel(gsel), .addr_a(g_addr_a), .addr_b(g_addr_b),
         .gdata_a(g_rdata_a), .gdata_b(g_rdata_b));
 
-    wire [9:0] mv_ra, mv_wa; wire mv_we; wire signed [15:0] mv_wd; wire mv_busy, mv_done;
-    wire [11:0] w_addr; wire [384-1:0] w_rdata;   // 24 lanes x 16-bit weight bus
+    wire [9:0] mv_aa, mv_ab; wire mv_wea, mv_web; wire signed [15:0] mv_wda, mv_wdb;
+    wire mv_busy, mv_done;
+    wire [11:0] w_addr; wire [768-1:0] w_rdata;   // 24 lanes x 16-bit x 2 columns/cycle
     matvec u_mv (.clk(clk), .resetn(resetn), .start(mv_go),
         .wsel(wsel[2:0]), .in_dim(in_dim), .out_dim(out_dim),
         .act_base(a_base), .dst_base(mv_dst), .descale(descale),
-        .v_raddr(mv_ra), .v_rdata(v_rdata), .v_we(mv_we), .v_waddr(mv_wa), .v_wdata(mv_wd),
+        .addr_a(mv_aa), .rd_a(v_rdata), .we_a(mv_wea), .wd_a(mv_wda),
+        .addr_b(mv_ab), .rd_b(v_rdata_b), .we_b(mv_web), .wd_b(mv_wdb),
         .w_addr(w_addr), .w_rdata(w_rdata), .busy(mv_busy), .done(mv_done));
     wrom u_wrom (.sel(wsel[2:0]), .addr(w_addr), .wdata(w_rdata));
 
@@ -103,22 +105,22 @@ module microgpt_core (
         .busy(sp_busy), .done(sp_done));
 
     // ---------------- vmem dual-port mux (active actuator) ----------------
-    // port A: primary read for every actuator (norm also writes on it during scale)
+    // port A: primary read for every actuator (norm/matvec also write on it)
     assign pa_addr =
-        (op == OP_NORM) ? no_aa : (op == OP_MATV) ? mv_ra :
+        (op == OP_NORM) ? no_aa : (op == OP_MATV) ? mv_aa :
         (op == OP_ATTN) ? at_ra : (op == OP_VADD || op == OP_RELU) ? vo_ra :
         (op == OP_SAMPLE) ? sp_ra : 10'd0;
-    assign pa_we = (op == OP_NORM) ? no_wea : 1'b0;
-    assign pa_wd = no_wda;
-    // port B: primary write for every actuator (norm also reads on it during sum)
+    assign pa_we = (op == OP_NORM) ? no_wea : (op == OP_MATV) ? mv_wea : 1'b0;
+    assign pa_wd = (op == OP_MATV) ? mv_wda : no_wda;
+    // port B: primary write for every actuator (norm/matvec also read on it)
     assign pb_addr =
-        (op == OP_NORM) ? no_ab : (op == OP_EMBED) ? em_wa : (op == OP_MATV) ? mv_wa :
+        (op == OP_NORM) ? no_ab : (op == OP_MATV) ? mv_ab : (op == OP_EMBED) ? em_wa :
         (op == OP_ATTN) ? at_wa : (op == OP_VADD || op == OP_RELU) ? vo_wa : 10'd0;
     assign pb_we =
-        (op == OP_NORM) ? no_web : (op == OP_EMBED) ? em_we : (op == OP_MATV) ? mv_we :
+        (op == OP_NORM) ? no_web : (op == OP_MATV) ? mv_web : (op == OP_EMBED) ? em_we :
         (op == OP_ATTN) ? at_we : (op == OP_VADD || op == OP_RELU) ? vo_we : 1'b0;
     assign pb_wd =
-        (op == OP_NORM) ? no_wdb : (op == OP_EMBED) ? em_wd : (op == OP_MATV) ? mv_wd :
+        (op == OP_NORM) ? no_wdb : (op == OP_MATV) ? mv_wdb : (op == OP_EMBED) ? em_wd :
         (op == OP_ATTN) ? at_wd : vo_wd;
 
     wire act_done =

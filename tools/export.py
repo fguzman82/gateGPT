@@ -25,24 +25,29 @@ def write_hex(name, arr2d):
 
 
 def write_tiled_hex(name, W, lanes=24):
-    """Wide weight ROM for the LANES-parallel matvec tile. W has shape (out_dim, in_dim).
-    Output rows are split into tiles of LANES rows; each ROM word holds the LANES weights
-    for one input index i across the tile's rows (lane = row within the tile). A word is
-    addressed by tile*in_dim + i and packed lane-0 in the least-significant 16 bits, so
-    w_rdata[lane*16 +: 16] selects that lane. Tiles past out_dim are zero-padded."""
+    """Wide weight ROM for the LANES-parallel, 2-columns/cycle matvec tile. W has shape
+    (out_dim, in_dim). Output rows are split into tiles of LANES rows; each ROM word holds
+    the LANES weights for TWO consecutive input columns (2j, 2j+1) across the tile's rows.
+    A word is addressed by tile*(in_dim/2) + j; packing puts column 2j in the low LANES*16
+    bits (lane 0 = LSB) and column 2j+1 in the high LANES*16 bits, so w_rdata[lane*16 +:16]
+    is the lane's weight for col 2j and w_rdata[LANES*16 + lane*16 +:16] for col 2j+1.
+    in_dim must be even; tiles past out_dim are zero-padded."""
     W = np.asarray(W)
     out_dim, in_dim = W.shape
+    assert in_dim % 2 == 0, "2-column matvec needs even in_dim"
     tiles = (out_dim + lanes - 1) // lanes
     with open(os.path.join(GEN, name), "w") as f:
         for t in range(tiles):
-            for i in range(in_dim):
+            for j in range(in_dim // 2):
                 word = ""
-                for lane in reversed(range(lanes)):     # lane 23 = MSB ... lane 0 = LSB
-                    o = t * lanes + lane
-                    val = int(W[o, i]) if o < out_dim else 0
-                    word += f"{val & 0xFFFF:04x}"
+                # most-significant first: col 2j+1 (lane23..0), then col 2j (lane23..0)
+                for col in (2 * j + 1, 2 * j):
+                    for lane in reversed(range(lanes)):
+                        o = t * lanes + lane
+                        val = int(W[o, col]) if o < out_dim else 0
+                        word += f"{val & 0xFFFF:04x}"
                 f.write(word + "\n")
-    return tiles * in_dim
+    return tiles * (in_dim // 2)
 
 
 def main():
