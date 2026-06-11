@@ -1,4 +1,4 @@
-// Unit test for the RMSNorm engine vs the Python fixed-point reference.
+// Unit test for the RMSNorm engine vs the Python fixed-point reference (dual-port vmem).
 `timescale 1ns/1ps
 module tb_norm;
     localparam N = 24;
@@ -8,28 +8,33 @@ module tb_norm;
     reg signed [15:0] tin [0:N-1], texp [0:N-1];
 
     reg        load;
-    reg        tb_we;  reg [9:0] tb_waddr, tb_raddr;  reg signed [15:0] tb_wdata;
-    wire       n_we;   wire [9:0] n_waddr, n_raddr;   wire signed [15:0] n_wdata;
+    reg        tb_we;  reg [9:0] tb_addr;  reg signed [15:0] tb_wdata;
 
-    wire       v_we    = load ? tb_we    : n_we;
-    wire [9:0] v_waddr = load ? tb_waddr : n_waddr;
-    wire signed [15:0] v_wdata = load ? tb_wdata : n_wdata;
-    wire [9:0] v_raddr = load ? tb_raddr : n_raddr;
-    wire signed [15:0] v_rdata;
+    wire [9:0] na_a, na_b; wire na_wea, na_web; wire signed [15:0] na_wda, na_wdb;
+    wire [5:0] ga_a, ga_b; wire signed [15:0] gd_a, gd_b;
 
-    vmem #(.AW(10), .DW(16)) u_vmem (.clk(clk), .we(v_we), .waddr(v_waddr),
-        .wdata(v_wdata), .raddr(v_raddr), .rdata(v_rdata));
+    // ports muxed between the TB (load/readback) and norm (run)
+    wire        pa_we   = load ? tb_we    : na_wea;
+    wire [9:0]  pa_addr = load ? tb_addr  : na_a;
+    wire signed [15:0] pa_wd = load ? tb_wdata : na_wda;
+    wire        pb_we   = load ? 1'b0     : na_web;
+    wire [9:0]  pb_addr = load ? 10'd0    : na_b;
+    wire signed [15:0] pb_wd = na_wdb;
+    wire signed [15:0] rda, rdb;
 
-    wire [5:0] g_addr;  wire signed [15:0] g_rdata;
-    grom u_grom (.sel(2'd0), .addr(g_addr), .gdata(g_rdata));   // g1
+    vmem2 #(.AW(10), .DW(16)) u_vmem (.clk(clk),
+        .we_a(pa_we), .addr_a(pa_addr), .wdata_a(pa_wd), .rdata_a(rda),
+        .we_b(pb_we), .addr_b(pb_addr), .wdata_b(pb_wd), .rdata_b(rdb));
+
+    grom u_grom (.sel(2'd0), .addr_a(ga_a), .addr_b(ga_b), .gdata_a(gd_a), .gdata_b(gd_b));
 
     wire n_busy, n_done;
     norm #(.N(N), .FRAC(11)) u_norm (
         .clk(clk), .resetn(resetn), .start(start),
         .src_base(10'd0), .dst_base(10'd64), .gain_sel(2'd0),
-        .v_raddr(n_raddr), .v_rdata(v_rdata),
-        .v_we(n_we), .v_waddr(n_waddr), .v_wdata(n_wdata),
-        .g_addr(g_addr), .g_rdata(g_rdata),
+        .addr_a(na_a), .rd_a(rda), .we_a(na_wea), .wd_a(na_wda),
+        .addr_b(na_b), .rd_b(rdb), .we_b(na_web), .wd_b(na_wdb),
+        .g_addr_a(ga_a), .g_addr_b(ga_b), .g_rdata_a(gd_a), .g_rdata_b(gd_b),
         .busy(n_busy), .done(n_done));
 
     integer k, errors;
@@ -39,16 +44,16 @@ module tb_norm;
         errors = 0; load = 1; tb_we = 0; resetn = 0;
         repeat (4) @(posedge clk); resetn = 1;
         for (k = 0; k < N; k = k + 1) begin
-            @(negedge clk); tb_we = 1; tb_waddr = k[9:0]; tb_wdata = tin[k];
+            @(negedge clk); tb_we = 1; tb_addr = k[9:0]; tb_wdata = tin[k];
         end
         @(negedge clk); tb_we = 0; load = 0;
         @(negedge clk); start = 1; @(negedge clk); start = 0;
         wait (n_done); @(posedge clk);
         load = 1;
         for (k = 0; k < N; k = k + 1) begin
-            tb_raddr = 10'd64 + k[9:0]; @(posedge clk); #1;
-            if (v_rdata !== texp[k]) begin
-                $display("NORM MISMATCH i=%0d got=%0d exp=%0d", k, $signed(v_rdata), $signed(texp[k]));
+            tb_addr = 10'd64 + k[9:0]; @(posedge clk); #1;
+            if (rda !== texp[k]) begin
+                $display("NORM MISMATCH i=%0d got=%0d exp=%0d", k, $signed(rda), $signed(texp[k]));
                 errors = errors + 1;
             end
         end

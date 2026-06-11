@@ -44,13 +44,15 @@ module microgpt_core (
     wire [9:0] pos_off = pos_r * N_EMBED;                    // cache slot offset
     wire [9:0] mv_dst  = use_pos ? (d_base + pos_off) : d_base;
 
-    // ---------------- shared vmem ----------------
-    wire [9:0]  v_raddr;
-    wire        v_we;
-    wire [9:0]  v_waddr;
-    wire signed [15:0] v_wdata, v_rdata;
-    vmem #(.AW(10), .DW(16)) u_vmem (.clk(clk), .we(v_we), .waddr(v_waddr),
-        .wdata(v_wdata), .raddr(v_raddr), .rdata(v_rdata));
+    // ---------------- shared vmem (true dual-port) ----------------
+    // port A is the primary read (rdata=v_rdata) and norm's 2nd write; port B is the
+    // primary write and norm's 2nd read (rdata=v_rdata_b).
+    wire [9:0]  pa_addr, pb_addr;
+    wire        pa_we, pb_we;
+    wire signed [15:0] pa_wd, pb_wd, v_rdata, v_rdata_b;
+    vmem2 #(.AW(10), .DW(16)) u_vmem (.clk(clk),
+        .we_a(pa_we), .addr_a(pa_addr), .wdata_a(pa_wd), .rdata_a(v_rdata),
+        .we_b(pb_we), .addr_b(pb_addr), .wdata_b(pb_wd), .rdata_b(v_rdata_b));
 
     // ---------------- actuators ----------------
     reg  em_go, no_go, mv_go, at_go, vo_go, sp_go;
@@ -59,13 +61,17 @@ module microgpt_core (
         .token(tok_r), .pos(pos_r[3:0]), .dst_base(d_base),
         .v_we(em_we), .v_waddr(em_wa), .v_wdata(em_wd), .busy(em_busy), .done(em_done));
 
-    wire [9:0] no_ra, no_wa; wire no_we; wire signed [15:0] no_wd; wire no_busy, no_done;
-    wire [5:0] g_addr; wire signed [15:0] g_rdata;
+    wire [9:0] no_aa, no_ab; wire no_wea, no_web; wire signed [15:0] no_wda, no_wdb;
+    wire no_busy, no_done;
+    wire [5:0] g_addr_a, g_addr_b; wire signed [15:0] g_rdata_a, g_rdata_b;
     norm #(.N(N_EMBED), .FRAC(FRAC_BITS)) u_norm (.clk(clk), .resetn(resetn), .start(no_go),
         .src_base(a_base), .dst_base(d_base), .gain_sel(gsel),
-        .v_raddr(no_ra), .v_rdata(v_rdata), .v_we(no_we), .v_waddr(no_wa), .v_wdata(no_wd),
-        .g_addr(g_addr), .g_rdata(g_rdata), .busy(no_busy), .done(no_done));
-    grom u_grom (.sel(gsel), .addr(g_addr), .gdata(g_rdata));
+        .addr_a(no_aa), .rd_a(v_rdata), .we_a(no_wea), .wd_a(no_wda),
+        .addr_b(no_ab), .rd_b(v_rdata_b), .we_b(no_web), .wd_b(no_wdb),
+        .g_addr_a(g_addr_a), .g_addr_b(g_addr_b), .g_rdata_a(g_rdata_a), .g_rdata_b(g_rdata_b),
+        .busy(no_busy), .done(no_done));
+    grom u_grom (.sel(gsel), .addr_a(g_addr_a), .addr_b(g_addr_b),
+        .gdata_a(g_rdata_a), .gdata_b(g_rdata_b));
 
     wire [9:0] mv_ra, mv_wa; wire mv_we; wire signed [15:0] mv_wd; wire mv_busy, mv_done;
     wire [11:0] w_addr; wire [384-1:0] w_rdata;   // 24 lanes x 16-bit weight bus
@@ -96,19 +102,23 @@ module microgpt_core (
         .v_raddr(sp_ra), .v_rdata(v_rdata), .token(sp_tok), .rng_out(sp_rng),
         .busy(sp_busy), .done(sp_done));
 
-    // ---------------- vmem port mux (active actuator) ----------------
-    assign v_raddr =
-        (op == OP_NORM) ? no_ra : (op == OP_MATV) ? mv_ra :
+    // ---------------- vmem dual-port mux (active actuator) ----------------
+    // port A: primary read for every actuator (norm also writes on it during scale)
+    assign pa_addr =
+        (op == OP_NORM) ? no_aa : (op == OP_MATV) ? mv_ra :
         (op == OP_ATTN) ? at_ra : (op == OP_VADD || op == OP_RELU) ? vo_ra :
         (op == OP_SAMPLE) ? sp_ra : 10'd0;
-    assign v_we =
-        (op == OP_EMBED) ? em_we : (op == OP_NORM) ? no_we : (op == OP_MATV) ? mv_we :
+    assign pa_we = (op == OP_NORM) ? no_wea : 1'b0;
+    assign pa_wd = no_wda;
+    // port B: primary write for every actuator (norm also reads on it during sum)
+    assign pb_addr =
+        (op == OP_NORM) ? no_ab : (op == OP_EMBED) ? em_wa : (op == OP_MATV) ? mv_wa :
+        (op == OP_ATTN) ? at_wa : (op == OP_VADD || op == OP_RELU) ? vo_wa : 10'd0;
+    assign pb_we =
+        (op == OP_NORM) ? no_web : (op == OP_EMBED) ? em_we : (op == OP_MATV) ? mv_we :
         (op == OP_ATTN) ? at_we : (op == OP_VADD || op == OP_RELU) ? vo_we : 1'b0;
-    assign v_waddr =
-        (op == OP_EMBED) ? em_wa : (op == OP_NORM) ? no_wa : (op == OP_MATV) ? mv_wa :
-        (op == OP_ATTN) ? at_wa : vo_wa;
-    assign v_wdata =
-        (op == OP_EMBED) ? em_wd : (op == OP_NORM) ? no_wd : (op == OP_MATV) ? mv_wd :
+    assign pb_wd =
+        (op == OP_NORM) ? no_wdb : (op == OP_EMBED) ? em_wd : (op == OP_MATV) ? mv_wd :
         (op == OP_ATTN) ? at_wd : vo_wd;
 
     wire act_done =

@@ -1,8 +1,9 @@
 // RMSNorm engine: y[i] = sat16( sat16(x[i]*scale >> FRAC) * gain[i] >> FRAC ),
 // scale = min( 2^(2*FRAC) / isqrt(sum(x^2)/N), 32767 ). Bit-exact with the Python
-// reference (tools/fixedpoint.rmsnorm). vmem read is REGISTERED, so the sum-of-squares
-// pass reads x[i] read-ahead and caches it in xreg[]; the scale pass then works from
-// the local cache (+ combinational gain), with no second vmem read.
+// reference (tools/fixedpoint.rmsnorm). Uses the TRUE dual-port vmem: the sum-of-squares
+// pass reads TWO elements per cycle (ports A+B) and the scale pass writes TWO per cycle,
+// so both N-length loops run in N/2 cycles (N must be even). Read addresses are driven
+// combinationally (registered read inside vmem -> 1-cycle latency, read-ahead).
 module norm #(
     parameter integer N    = 24,
     parameter integer FRAC = 11
@@ -13,29 +14,38 @@ module norm #(
     input  wire [9:0]  src_base,
     input  wire [9:0]  dst_base,
     input  wire [1:0]  gain_sel,
-    output wire [9:0]  v_raddr,
-    input  wire signed [15:0] v_rdata,
-    output reg         v_we,
-    output reg  [9:0]  v_waddr,
-    output reg  signed [15:0] v_wdata,
-    output wire [5:0]  g_addr,
-    input  wire signed [15:0] g_rdata,
+    // port A
+    output reg  [9:0]  addr_a,
+    input  wire signed [15:0] rd_a,
+    output reg         we_a,
+    output reg  signed [15:0] wd_a,
+    // port B
+    output reg  [9:0]  addr_b,
+    input  wire signed [15:0] rd_b,
+    output reg         we_b,
+    output reg  signed [15:0] wd_b,
+    // gains (two per cycle)
+    output wire [5:0]  g_addr_a,
+    output wire [5:0]  g_addr_b,
+    input  wire signed [15:0] g_rdata_a,
+    input  wire signed [15:0] g_rdata_b,
     output reg         busy,
     output reg         done
 );
     localparam [2:0] S_IDLE=0, S_SUM=1, S_SUMD=2, S_DIV1=3, S_SQRT=4, S_DIV2=5, S_SCALE=6;
     reg [2:0]  st;
-    reg [6:0]  fi, fi_d;
+    reg [6:0]  fi, fi_d;                  // element index (advances by 2), delayed copy
     reg        feeding, vld;
     reg signed [47:0] ss;
     reg [31:0] scale_q;
     reg signed [15:0] xreg [0:N-1];
-    reg signed [15:0] t1_r, gain_r;          // scale-pass pipeline registers
+    reg signed [15:0] t1a_r, t1b_r, ga_r, gb_r;   // scale-pass pipeline registers
 
-    assign v_raddr = src_base + {3'd0, fi};
-    assign g_addr  = fi[5:0];
+    assign g_addr_a = fi[5:0];
+    assign g_addr_b = fi[5:0] + 6'd1;
 
-    wire signed [47:0] xsq = $signed(v_rdata) * $signed(v_rdata);
+    wire signed [47:0] xsq_a = $signed(rd_a) * $signed(rd_a);
+    wire signed [47:0] xsq_b = $signed(rd_b) * $signed(rd_b);
 
     // shared udiv / isqrt
     reg  [47:0] d_num, d_den;
@@ -48,40 +58,64 @@ module norm #(
     isqrt #(.W(32)) u_sqrt (.clk(clk), .resetn(resetn), .start(s_start),
         .radicand(d_num[31:0]), .busy(), .done(s_done), .root(s_root));
 
-    // scale pass, stage 1: t1 = sat16( x*scale >> FRAC )  (registered into t1_r)
-    wire signed [31:0] xs    = $signed(xreg[fi[4:0]]) * $signed(scale_q[15:0]);
-    wire signed [31:0] xs_sh = xs >>> FRAC;
-    wire signed [15:0] t1 =
-        (xs_sh >  32'sd32767) ? 16'sd32767 : (xs_sh < -32'sd32768) ? -16'sd32768 : xs_sh[15:0];
-    // scale pass, stage 2: y = sat16( t1 * gain >> FRAC )  (from registered t1_r/gain_r)
-    wire signed [31:0] tg    = t1_r * gain_r;
-    wire signed [31:0] tg_sh = tg >>> FRAC;
-    wire signed [15:0] yval =
-        (tg_sh >  32'sd32767) ? 16'sd32767 : (tg_sh < -32'sd32768) ? -16'sd32768 : tg_sh[15:0];
+    // scale pass stage 1 (two lanes): t1 = sat16( x*scale >> FRAC )
+    wire signed [31:0] xsa    = $signed(xreg[fi[4:0]])        * $signed(scale_q[15:0]);
+    wire signed [31:0] xsb    = $signed(xreg[fi[4:0] + 5'd1]) * $signed(scale_q[15:0]);
+    wire signed [31:0] xsa_sh = xsa >>> FRAC;
+    wire signed [31:0] xsb_sh = xsb >>> FRAC;
+    wire signed [15:0] t1a =
+        (xsa_sh >  32'sd32767) ? 16'sd32767 : (xsa_sh < -32'sd32768) ? -16'sd32768 : xsa_sh[15:0];
+    wire signed [15:0] t1b =
+        (xsb_sh >  32'sd32767) ? 16'sd32767 : (xsb_sh < -32'sd32768) ? -16'sd32768 : xsb_sh[15:0];
+    // scale pass stage 2 (two lanes): y = sat16( t1 * gain >> FRAC )
+    wire signed [31:0] tga    = t1a_r * ga_r;
+    wire signed [31:0] tgb    = t1b_r * gb_r;
+    wire signed [31:0] tga_sh = tga >>> FRAC;
+    wire signed [31:0] tgb_sh = tgb >>> FRAC;
+    wire signed [15:0] ya =
+        (tga_sh >  32'sd32767) ? 16'sd32767 : (tga_sh < -32'sd32768) ? -16'sd32768 : tga_sh[15:0];
+    wire signed [15:0] yb =
+        (tgb_sh >  32'sd32767) ? 16'sd32767 : (tgb_sh < -32'sd32768) ? -16'sd32768 : tgb_sh[15:0];
+
+    // combinational port drivers (read pair during SUM, write pair during SCALE)
+    wire scale_wr = (st == S_SCALE) && vld;
+    always @(*) begin
+        addr_a = src_base + {3'd0, fi};
+        addr_b = src_base + {3'd0, fi} + 10'd1;
+        we_a = 1'b0; we_b = 1'b0; wd_a = ya; wd_b = yb;
+        if (scale_wr) begin
+            addr_a = dst_base + {3'd0, fi_d};
+            addr_b = dst_base + {3'd0, fi_d} + 10'd1;
+            we_a = 1'b1; we_b = 1'b1;
+        end
+    end
 
     always @(posedge clk) begin
         if (!resetn) begin
-            st <= S_IDLE; busy <= 0; done <= 0; v_we <= 0; d_start <= 0; s_start <= 0;
-            feeding <= 0; vld <= 0;
+            st <= S_IDLE; busy <= 0; done <= 0;
+            d_start <= 0; s_start <= 0; feeding <= 0; vld <= 0;
         end else begin
-            done <= 0; v_we <= 0; d_start <= 0; s_start <= 0;
+            done <= 0; d_start <= 0; s_start <= 0;
             fi_d <= fi; vld <= feeding;
             case (st)
                 S_IDLE: if (start) begin
                     busy <= 1; fi <= 0; ss <= 0; feeding <= 1; st <= S_SUM;
                 end
                 S_SUM: begin
-                    if (vld) begin ss <= ss + xsq; xreg[fi_d[4:0]] <= v_rdata; end
-                    if (fi == N - 1) begin feeding <= 0; st <= S_SUMD; end
-                    else fi <= fi + 1;
+                    if (vld) begin
+                        ss <= ss + xsq_a + xsq_b;
+                        xreg[fi_d[4:0]] <= rd_a; xreg[fi_d[4:0] + 5'd1] <= rd_b;
+                    end
+                    if (fi == N - 2) begin feeding <= 0; st <= S_SUMD; end
+                    else fi <= fi + 7'd2;
                 end
                 S_SUMD: begin
-                    xreg[fi_d[4:0]] <= v_rdata;            // last x
-                    d_num <= ss + xsq; d_den <= N; d_start <= 1;   // full sum / N
+                    xreg[fi_d[4:0]] <= rd_a; xreg[fi_d[4:0] + 5'd1] <= rd_b;   // last pair
+                    d_num <= ss + xsq_a + xsq_b; d_den <= N; d_start <= 1;      // full sum / N
                     st <= S_DIV1;
                 end
                 S_DIV1: if (d_done) begin
-                    d_num <= (d_quo[31:0] < 1) ? 48'd1 : {16'd0, d_quo[31:0]};   // feed isqrt
+                    d_num <= (d_quo[31:0] < 1) ? 48'd1 : {16'd0, d_quo[31:0]};  // feed isqrt
                     s_start <= 1; st <= S_SQRT;
                 end
                 S_SQRT: if (s_done) begin
@@ -94,14 +128,11 @@ module norm #(
                     fi <= 0; feeding <= 1; st <= S_SCALE;
                 end
                 S_SCALE: begin
-                    t1_r <= t1; gain_r <= g_rdata;            // stage 1 -> register
-                    if (vld) begin                            // stage 2 -> write
-                        v_we <= 1; v_waddr <= dst_base + {3'd0, fi_d}; v_wdata <= yval;
-                        if (fi_d == N - 1) begin busy <= 0; done <= 1; st <= S_IDLE; end
-                    end
+                    t1a_r <= t1a; t1b_r <= t1b; ga_r <= g_rdata_a; gb_r <= g_rdata_b;
+                    if (vld && fi_d == N - 2) begin busy <= 0; done <= 1; st <= S_IDLE; end
                     if (feeding) begin
-                        if (fi == N - 1) feeding <= 0;
-                        else fi <= fi + 1;
+                        if (fi == N - 2) feeding <= 0;
+                        else fi <= fi + 7'd2;
                     end
                 end
                 default: st <= S_IDLE;
