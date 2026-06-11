@@ -22,8 +22,9 @@ module sampler #(
 );
     localparam [2:0] S_IDLE=0, S_SCALE=1, S_EXP=2, S_MOD=3, S_PICK=4;
     reg [2:0]  st;
-    reg [4:0]  i, fi, fi_d, amax;
-    reg        feeding, vld;
+    reg [4:0]  i, fi, fi_d, fi_d2, amax;
+    reg        feeding, vld, vld2;
+    reg signed [15:0] logit_r;    // logit registered before the variable temp multiply
     reg signed [15:0] scaled [0:31];
     reg [15:0]        ev [0:31];
     reg signed [15:0] mmax;       // max of scaled logits (for softmax)
@@ -32,8 +33,10 @@ module sampler #(
 
     assign v_raddr = lm_base + {5'd0, fi};
 
-    // temperature scale: sat16( (logit * inv_temp) >> FRAC )
-    wire signed [31:0] sc  = $signed(v_rdata) * inv_temp;
+    // temperature scale: sat16( (logit * inv_temp) >> FRAC ). inv_temp is now variable
+    // (rotary-selected), so register the logit first -> the 16x16 multiply starts from a
+    // fabric register, keeping the BRAM-output net off the critical path.
+    wire signed [31:0] sc  = $signed(logit_r) * inv_temp;
     wire signed [31:0] scs = sc >>> FRAC;
     wire signed [15:0] scaled_v =
         (scs >  32'sd32767) ? 16'sd32767 : (scs < -32'sd32768) ? -16'sd32768 : scs[15:0];
@@ -59,22 +62,23 @@ module sampler #(
         end else begin
             done <= 0; d_start <= 0;
             fi_d <= fi; vld <= feeding;
+            fi_d2 <= fi_d; vld2 <= vld; logit_r <= v_rdata;     // scale-pass pipeline stage
             case (st)
                 S_IDLE: if (start) begin
                     busy <= 1; fi <= 0; mmax <= -16'sd32768; maxlog <= -16'sd32768; amax <= 0;
                     total <= 0; feeding <= 1; st <= S_SCALE;
                 end
                 S_SCALE: begin
-                    if (vld) begin
-                        scaled[fi_d] <= scaled_v;
+                    if (vld2) begin                              // consume the registered logit
+                        scaled[fi_d2] <= scaled_v;
                         if (scaled_v > mmax) mmax <= scaled_v;
-                        if ($signed(v_rdata) > maxlog) begin maxlog <= v_rdata; amax <= fi_d; end
+                        if ($signed(logit_r) > maxlog) begin maxlog <= logit_r; amax <= fi_d2; end
                     end
                     if (feeding) begin
                         if (fi == VOCAB - 1) feeding <= 0;
                         else fi <= fi + 1;
                     end
-                    if (vld && fi_d == VOCAB - 1) begin
+                    if (vld2 && fi_d2 == VOCAB - 1) begin
                         if (sample_mode) begin fi <= 0; feeding <= 1; st <= S_EXP; end
                         else begin token <= amax; rng_out <= rng_in;
                                    busy <= 0; done <= 1; st <= S_IDLE; end

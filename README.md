@@ -1,39 +1,127 @@
 # microGPT-FPGA
 
-A character-level transformer that generates names, implemented from scratch for the
-**Xilinx Virtex-5 XC5VLX110T** (XUPV5 / ML509 board, ISE 14.7, Verilog-2001). The model
-is trained in Python, quantized to fixed point, and run entirely in hardware; generated
-names scroll on the board's character LCD and a rotary encoder sets the generation speed.
+A character-level transformer that generates names, implemented **from scratch** for the
+**Xilinx Virtex-5 XC5VLX110T** (XUPV5 / ML509 board, ISE 14.7, Verilog-2001). The model is
+trained in Python, quantized to fixed point, and run entirely in hardware; generated names
+scroll on the board's character LCD, and a rotary encoder sets the generation speed and the
+sampling temperature.
+
+This is an independent design: the RTL, the fixed-point spec, the microcode ISA, and the
+weights are all our own. The headline result is a **28× throughput improvement** over the
+first working version — from ~2.4k to **~69k tokens/second at 80 MHz**, all bit-exact and
+confirmed closing timing post place-and-route on real silicon.
+
+---
 
 ## Architecture
 
-The inference core is built as a **microcode-ROM sequencer driving modular datapath
-actuators** — not a hand-coded monolithic state machine. A small program ROM
-(`generated/ucode.hex`, produced by `tools/ucode_asm.py`) encodes the transformer
-schedule as macro-ops; a micro-PC fetches one per step and starts the matching actuator,
-which does the work over a shared activation scratchpad (`vmem`).
+The inference core is a **microcode-ROM sequencer driving modular datapath actuators** — not
+a hand-coded monolithic state machine. A small program ROM (`generated/ucode.hex`, produced by
+`tools/ucode_asm.py`) encodes the transformer schedule as macro-ops; a micro-PC fetches one per
+step, starts the matching actuator, and waits for `done`. Actuators share a true dual-port
+activation scratchpad (`vmem`, one Block RAM) that also holds the persistent KV cache.
+
+```
+            ┌──────────────────────────────────────────────────────────┐
+ token,pos ─►│  micro-PC ── fetch ──► program ROM (ucode.hex)           │
+            │      │                       │ macro-op (op, dims, addrs) │
+            │      │                       ▼                            │
+            │      │            ┌──── decode / actuator select ────┐   │
+            │      ▼            ▼        ▼        ▼        ▼        ▼   │
+            │   embed       norm     matvec     attn    vecop   sampler│
+            │      │            │        │        │        │        │  │
+            │      └──────┬─────┴────┬───┴───┬────┴────┬───┴────────┘  │
+            │       portA │    portB │  weights (wrom) │  gains (grom) │
+            │             ▼          ▼                 │               │
+            │        ┌─────────────────────┐           │               │
+            │        │  vmem — dual-port    │◄──────────┘  next_token ──►
+            │        │  BRAM scratchpad     │              rng_out
+            │        │  (working + KV cache)│
+            │        └─────────────────────┘
+            └──────────────────────────────────────────────────────────┘
+```
 
 Datapath actuators (`core/`):
 
 | Module | Role |
 |---|---|
-| `matvec` | streaming multiply-accumulate (the linear projections) |
-| `norm` | RMSNorm (`udiv` + `isqrt` primitives) |
-| `attn` | single-position multi-head causal attention (scores → softmax → weighted sum) |
+| `matvec` | parallel multiply-accumulate tile — the linear projections (24 lanes × 2 columns/cycle) |
+| `norm` | RMSNorm (`udiv` + `isqrt` primitives), 2 elements/cycle on the dual-port vmem |
+| `attn` | single-position multi-head causal attention with per-head parallel dividers |
 | `exp_unit` | fixed-point `exp` via table + linear interpolation |
 | `sampler` | temperature softmax + LCG categorical sampling, or greedy argmax |
 | `embed`, `vecop` | embedding lookup, residual add / ReLU |
-| `wrom`, `grom`, `vmem` | weight ROMs, RMSNorm gains, activation scratchpad |
+| `wrom`, `grom`, `vmem2` | wide weight ROMs, RMSNorm gains, true dual-port activation scratchpad |
 
-The model: 1 transformer block, `n_embed=24`, 4 heads × 6, MLP hidden 96, context 16,
-vocabulary 27 (`.` + `a`–`z`). All arithmetic is signed **Q5.11** fixed point. The Python
-integer reference (`tools/fixedpoint.py`) is the bit-exact specification the RTL matches.
+**Model:** 1 transformer block, `n_embed=24`, 4 heads × head-dim 6, MLP hidden 96, context 16,
+vocabulary 27 (`.` + `a`–`z`). All arithmetic is signed **Q5.11** fixed point (FRAC=11). The
+Python integer reference (`tools/fixedpoint.py`) is the bit-exact specification the RTL matches.
+
+| Parameter | Value |
+|---|---|
+| Blocks / heads / head-dim | 1 / 4 / 6 |
+| Embedding / MLP hidden | 24 / 96 |
+| Context (block size) / vocab | 16 / 27 |
+| Number format | Q5.11 signed 16-bit |
+| RNG / divide | 32-bit LCG / truncate-toward-zero |
+| RMSNorm | integer `isqrt` + reciprocal |
+| `exp` | 17-entry table + linear interpolation |
+
+---
+
+## Results — the optimization journey
+
+Every step below is **bit-exact** to the Python reference (greedy `alaya`, sampled `rosphod`
+at seed 2, T=0.7) and verified in the iSim oracle. Throughput is per-token at the board clock.
+
+| # | Stage | Key change | Cycles/token | tok/s @ 80 MHz | LUT | DSP | Status |
+|---|---|---|---:|---:|---:|---:|---|
+| 0 | First core | microcode core, recompute full 16-tok context | 32,872 | 2,433 | 8.6k | 15 | 33 MHz board |
+| 1 | Timing rework | vmem→BRAM (registered read), read-ahead, pipelining | 32,872 | 2,433 | ~9k | 15 | **80 MHz** board |
+| 2 | KV cache | incremental decode, absolute positions, persistent K/V | 10,192 | 7,849 | ~9k | 15 | 80 MHz |
+| 3 | Parallel MAC | 24-lane systolic matvec tile | 2,757 | 29,016 | 14k | 35 | 80 MHz |
+| 4 | Parallel attn dividers | per-head concurrent softmax divides | 1,781 | 44,919 | 14k | 35 | **80.2 MHz** board |
+| 5 | radix-4 `udiv` | divider does 2 quotient bits/cycle | 1,541 | 51,914 | – | – | 80 MHz |
+| 6 | narrow `isqrt` + matvec writeback overlap | 32-bit isqrt; writeback hides behind next tile | 1,428 | 56,022 | 17k | 35 | **80 MHz** board |
+| 7 | dual-port vmem + RMSNorm 2×/cycle | true dual-port BRAM scratchpad | 1,356 | 58,997 | – | – | (intermediate) |
+| 8 | matvec 2 cols/cycle + 2 rows/cycle writeback | double-width weight ROM, dual-port reads/writes | 1,145 | 69,869 | 16.7k | 62 | needed pipelining |
+| 9 | **operand pipeline (final)** | extra register stage before the multiply closes timing | 1,156 | **69,204** | 15.5k | 62 | **80 MHz** board ✅ |
+
+**Throughput, final design @ 80 MHz** (bit-exact, post-PAR closed at 12.461 ns, 0 timing errors):
+
+| Metric | Cycles/token | tok/s |
+|---|---:|---:|
+| First token (best case) | 1,156 | ~69,200 |
+| Average over a full name | 1,321 | ~60,600 |
+| Longest-context token | 1,488 | ~53,800 |
+
+Resource footprint of the final board build: **15.5k LUT (22%), 5.3k slices (30%), 62 DSP
+(96%), 1 Block RAM**, on the XC5VLX110T at 80 MHz (DCM CLKFX ×4/5 from the 100 MHz oscillator).
+
+---
+
+## Key engineering lessons
+
+- **KV cache is the single biggest win** (3.2×): recomputing the whole context every token is
+  the dominant cost in a naïve decoder. Switching to absolute-position training enabled it.
+- **Post-synthesis Fmax lies under congestion.** A 2-columns/cycle matvec reported 88 MHz
+  post-synth but collapsed to 35 MHz post-PAR — because a mis-written dual-port template made
+  XST infer the 1024×16 scratchpad as **16,384 flip-flops** instead of a Block RAM (look for
+  `N flip-flops were inferred for signal <mem>` in the HDL report). The fix: **one `always`
+  block per port** for the true-dual-port BRAM template. LUT dropped 46.7k → 16.7k.
+- **Break long BRAM→DSP nets with a register.** The final 0.14 ns to 80 MHz was closed by
+  pipelining the activation/weight operands one extra stage so the high-fanout BRAM-output net
+  stays off the multiply's critical path.
+- **Exact integer arithmetic is free to parallelize.** radix-4 division and split MAC lanes
+  preserve the floor-divide / saturating results, so the golden never changes.
+
+---
 
 ## Layout
 
 ```
 core/         independent inference core (RTL) + generated includes (*.vh)
-board/        XUPV5 top, HD44780 LCD driver, rotary throttle, tokens/sec meter, UCF
+board/        XUPV5 top, HD44780 LCD driver, rotary control, tokens/sec meter, UCF
 tools/        model, training, fixed-point reference, weight/microcode export
 data/         public makemore names corpus (training data)
 generated/    fixed-point weight ROMs (*.hex) + microcode program (ucode.hex)
@@ -53,21 +141,20 @@ python tools/ucode_asm.py        # -> generated/ucode.hex, core/coremap.vh
 Simulate the core against the golden (Xilinx iSim):
 
 ```bash
-vlogcomp -work work core/*.v sim/tb_core.v
-fuse -incremental -o sim/tb_core_sim work.tb_core
-./sim/tb_core_sim -tclbatch sim/isim_run.tcl     # prints CORE PASS
+fuse -incremental -prj tb_core.prj -o sim/tb_core_sim work.tb_core
+./sim/tb_core_sim -tclbatch sim/isim_run.tcl     # prints CYCLES_PER_TOKEN + CORE PASS
 ```
 
-Build the board bitstream (ISE 14.7):
-
-```bash
-xtclsh build_board_ise_project.tcl     # generates the ISE project
-xtclsh run_board_bitgen.tcl            # synth -> map -> par -> bitgen
-```
+Build the board bitstream (ISE 14.7): `xst → ngdbuild → map → par → trce → bitgen` against
+`xupv5_microgpt_top.prj` / `board/xupv5_microgpt.ucf` for part `xc5vlx110t-1-ff1136`.
 
 ## Board
 
-- 100 MHz oscillator; the DCM divides it to a 33.3 MHz core clock.
-- On reset, names auto-generate at ~1 Hz; turn the rotary encoder to speed up (push to
-  freeze). LCD row 1 shows the current name, row 2 the measured tokens/second. LED[7] is
-  a 1 Hz heartbeat.
+- 100 MHz oscillator → DCM CLKFX ×4/5 → **80 MHz** core clock.
+- Names auto-generate; the **rotary encoder** adjusts one of two settings, chosen by
+  **pressing** it:
+  - **RATE** — auto-rotation speed, from ~1 Hz (readable) up to back-to-back (max throughput).
+  - **TEMP** — sampling temperature, `T = 0.5 … 1.2` in 0.1 steps (default 0.7).
+- `led[5]` lights while in TEMP mode. LCD row 1 shows the current name; row 2 shows the active
+  setting (`rate: NNNNN t/s` measured, or `temp: X.Y`). `led[7]` is a 1 Hz heartbeat.
+```

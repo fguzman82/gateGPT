@@ -1,10 +1,10 @@
 // XUPV5 (Virtex-5 XC5VLX110T) board top for the microGPT name generator.
 //
-// Demo: names auto-rotate on the 16x2 LCD. The ROTARY ENCODER is a throttle --
-// turn it to set the rotation speed from 1 Hz (slow, readable) up to the core's
-// maximum (back-to-back); press it to freeze the current name. Row 2 shows the
-// measured throughput in tokens/second. The start button still forces one name,
-// and the DIP switches perturb the random seed.
+// Demo: names auto-rotate on the 16x2 LCD. The ROTARY ENCODER adjusts one of two
+// settings, chosen by PRESSING it: RATE (rotation speed, 1 Hz up to back-to-back) or
+// TEMP (sampling temperature, T=0.5..1.2). led[5] lights while in TEMP mode; row 2 of
+// the LCD shows the active setting ("rate: NNNNN t/s" or "temp: X.Y"). The DIP switches
+// perturb the random seed.
 //
 // PC-side over the USB JTAG cable: an optional ChipScope VIO core (CHIPSCOPE_VIO).
 //
@@ -93,15 +93,35 @@ module xupv5_microgpt_top (
     wire [4:0]  name_len;
     wire [(16*8)-1:0] name_flat;
 
-    // rotary throttle drives auto-rotation
+    // rotary control: turn adjusts rate or temperature; press toggles which
     wire        auto_start;
     wire [4:0]  speed_level;
-    rotary_throttle #(.CLK_HZ(CLK_HZ)) u_rot (
+    wire [2:0]  temp_sel;
+    wire        cfg_mode;        // 0 = adjusting rate, 1 = adjusting temperature
+    rotary_throttle #(.CLK_HZ(CLK_HZ), .NTEMP(8)) u_rot (
         .clk(clk), .resetn(resetn),
         .rot_a(rot_a), .rot_b(rot_b), .rot_push(rot_push),
         .gen_busy(gen_busy),
-        .auto_start(auto_start), .speed_level(speed_level)
+        .auto_start(auto_start), .speed_level(speed_level),
+        .temp_sel(temp_sel), .cfg_mode(cfg_mode)
     );
+
+    // temperature presets: temp_sel 0..7 -> T = 0.5..1.2 (step 0.1); inv_temp = round(2048/T)
+    // in Q5.11. The sampler already has a 16x16 multiply, so any value is free; 0.1 steps
+    // keep the on-LCD readout to a single decimal digit.
+    function signed [15:0] temp_lut;
+        input [2:0] sel;
+        case (sel)
+            3'd0: temp_lut = 16'sd4096;   // T=0.5
+            3'd1: temp_lut = 16'sd3413;   // T=0.6
+            3'd2: temp_lut = 16'sd2926;   // T=0.7  (default)
+            3'd3: temp_lut = 16'sd2560;   // T=0.8
+            3'd4: temp_lut = 16'sd2276;   // T=0.9
+            3'd5: temp_lut = 16'sd2048;   // T=1.0
+            3'd6: temp_lut = 16'sd1862;   // T=1.1
+            default: temp_lut = 16'sd1707;// T=1.2
+        endcase
+    endfunction
 
     // Generation trigger = rotary throttle (auto-rotation) + optional host (VIO).
     // start_btn (AJ6) is intentionally NOT a trigger: on this board the line
@@ -113,7 +133,7 @@ module xupv5_microgpt_top (
     wire        gen_start = auto_start | vio_start;
     wire        _unused   = btn_pulse;   // start_btn kept wired/debounced but unused
     wire [31:0] gen_seed  = vio_use_host ? vio_seed : (seed_live ^ {24'd0, dip_sw});
-    wire signed [15:0] gen_inv_temp = 16'sd2926;   // (1/0.7) in Q5.11 -> T=0.7
+    wire signed [15:0] gen_inv_temp = temp_lut(temp_sel);   // rotary-selected temperature
 
     name_generator #(.MAX_LEN(16)) u_gen (
         .clk(clk), .resetn(resetn), .start(gen_start),
@@ -177,12 +197,24 @@ module xupv5_microgpt_top (
     wire [7:0] c2 = z2 ? 8'h20 : (8'h30 + d2);
     wire [7:0] c1 = z1 ? 8'h20 : (8'h30 + d1);
     wire [7:0] c0 =                8'h30 + d0;    // always >=1 digit
-    // bytes (col0..col15): r a t e :  _  c4 c3 c2 c1 c0  _  t / s _
-    wire [(16*8)-1:0] line2 = {
+    // RATE view (col0..15): "rate: NNNNN t/s"
+    wire [(16*8)-1:0] line2_rate = {
         8'h20, 8'h73, 8'h2f, 8'h74, 8'h20,            // [15..11] ' ' s / t ' '
         c0, c1, c2, c3, c4,                           // [10..6]
         8'h20, 8'h3a, 8'h65, 8'h74, 8'h61, 8'h72      // [5..0]  ' ' : e t a r
     };
+    // TEMP view (col0..15): "temp: X.Y       "  (T = 0.5..1.2, single decimal digit)
+    wire [3:0] t_tenths = 4'd5 + {1'b0, temp_sel};    // 5..12
+    wire       t_int    = (t_tenths >= 4'd10);
+    wire [3:0] t_dec    = t_int ? (t_tenths - 4'd10) : t_tenths;
+    wire [7:0] t_ic     = 8'h30 + {7'd0, t_int};      // '0' or '1'
+    wire [7:0] t_dc     = 8'h30 + {4'd0, t_dec};      // '0'..'9'
+    wire [(16*8)-1:0] line2_temp = {
+        8'h20, 8'h20, 8'h20, 8'h20, 8'h20, 8'h20, 8'h20,   // [15..9] spaces
+        t_dc, 8'h2e, t_ic, 8'h20,                          // [8..5]  Y . X ' '
+        8'h3a, 8'h70, 8'h6d, 8'h65, 8'h74                  // [4..0]  ':' 'p' 'm' 'e' 't'
+    };
+    wire [(16*8)-1:0] line2 = cfg_mode ? line2_temp : line2_rate;
 
     // ---------------- LCD ---------------------------------------------------------
     wire lcd_ready;
@@ -204,7 +236,7 @@ module xupv5_microgpt_top (
         if (hb_cnt >= 26'd39_999_999) begin hb_cnt <= 26'd0; hb <= ~hb; end   // 0.5 s @ 80 MHz
         else                                hb_cnt <= hb_cnt + 26'd1;
     end
-    assign led = {hb, gen_busy, 1'b0, speed_level};
+    assign led = {hb, gen_busy, cfg_mode, speed_level};   // led[5] = 1 while adjusting temp
 
     // ---------------- ChipScope VIO (PC over USB JTAG) ----------------------------
 `ifdef CHIPSCOPE_VIO
