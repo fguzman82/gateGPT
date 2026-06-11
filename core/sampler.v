@@ -38,12 +38,11 @@ module sampler #(
     wire signed [15:0] scaled_v =
         (scs >  32'sd32767) ? 16'sd32767 : (scs < -32'sd32768) ? -16'sd32768 : scs[15:0];
 
-    // exp(scaled[fi]-max), pipelined: register the exp input (dz_r), exp the next cycle
-    reg signed [15:0] dz_r;
+    // exp(scaled[fi]-max); exp_unit registers its input internally (latency 1)
     wire signed [16:0] diff = $signed(scaled[fi]) - $signed(mmax);
     wire signed [15:0] dz = (diff < -17'sd32768) ? -16'sd32768 : diff[15:0];
     wire signed [15:0] eo;
-    exp_unit u_exp (.z(dz_r), .e(eo));
+    exp_unit u_exp (.clk(clk), .z(dz), .e(eo));
 
     // modulo via udiv: the divider already produces the remainder (rng mod total),
     // so no separate q*total multiply is needed.
@@ -82,8 +81,7 @@ module sampler #(
                     end
                 end
                 S_EXP: begin
-                    dz_r <= dz;                              // stage 1: register exp input
-                    if (vld) begin                           // stage 2: exp + accumulate
+                    if (vld) begin                           // exp_unit output -> accumulate
                         ev[fi_d] <= eo;
                         total <= total + {16'd0, eo};
                         if (fi_d == VOCAB - 1) begin

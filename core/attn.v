@@ -70,12 +70,11 @@ module attn #(
         end
     endfunction
 
-    // exp(score[s]-max), pipelined: register the exp input (dz_r), exp the next cycle
-    reg signed [15:0] dz_r;
+    // exp(score[s]-max); exp_unit registers its input internally (latency 1)
     wire signed [16:0] diff = $signed(score[s]) - $signed(mmax);
     wire signed [15:0] dz = (diff < -17'sd32768) ? -16'sd32768 : diff[15:0];
     wire signed [15:0] eo;
-    exp_unit u_exp (.z(dz_r), .e(eo));
+    exp_unit u_exp (.clk(clk), .z(dz), .e(eo));
 
     // weighted-sum divide: |acc| / sum_e, sign of acc
     reg         d_start;
@@ -138,8 +137,7 @@ module attn #(
                     end
                 end
                 P_EXP: begin
-                    dz_r <= dz;                              // stage 1: register exp input
-                    if (vld) begin                           // stage 2: exp + accumulate
+                    if (vld) begin                           // exp_unit output -> accumulate
                         ev[s_d[3:0]] <= eo;
                         sum_e <= sum_e + {16'd0, eo};
                         if (s_d == BLOCK - 1) begin

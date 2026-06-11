@@ -3,9 +3,11 @@
 module tb_exp;
     localparam M = 102;       // upper bound on cases; extra entries stay x and are skipped
     reg signed [15:0] zs [0:M-1], es [0:M-1];
+    reg clk = 0;
+    always #5 clk = ~clk;
     reg signed [15:0] zin;
     wire signed [15:0] eo;
-    exp_unit u_exp (.z(zin), .e(eo));
+    exp_unit u_exp (.clk(clk), .z(zin), .e(eo));   // latency 1: e valid 1 cycle after z
 
     integer k, errors, n;
     initial begin
@@ -15,7 +17,7 @@ module tb_exp;
         errors = 0; n = 0;
         for (k = 0; k < M; k = k + 1) begin
             if (zs[k] !== 16'shxxxx) begin
-                zin = zs[k]; #1;
+                @(negedge clk); zin = zs[k]; @(posedge clk); #1;
                 n = n + 1;
                 if (eo !== es[k]) begin
                     $display("EXP MISMATCH z=%0d got=%0d exp=%0d", zs[k], $signed(eo), $signed(es[k]));
