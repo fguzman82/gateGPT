@@ -21,6 +21,17 @@ module tb_core;
     reg [4:0] seq [0:15];
     integer   slen;
 
+    // measure cycles per token (core start -> done)
+    integer cyc = 0; reg counting = 0; integer reported = 0;
+    always @(posedge clk) begin
+        if (start && !counting) begin counting <= 1; cyc <= 0; end
+        else if (counting) cyc <= cyc + 1;
+        if (done && counting) begin
+            if (reported == 0) $display("CYCLES_PER_TOKEN = %0d", cyc);
+            reported <= reported + 1; counting <= 0;
+        end
+    end
+
     // expected sequences
     reg [4:0] exp_greedy [0:5];
     reg [4:0] exp_samp   [0:6];
