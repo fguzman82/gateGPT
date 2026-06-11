@@ -44,9 +44,9 @@ module norm #(
     udiv #(.W(48)) u_div (.clk(clk), .resetn(resetn), .start(d_start),
         .num(d_num), .den(d_den), .busy(), .done(d_done), .quo(d_quo));
     reg         s_start;
-    wire        s_done;  wire [23:0] s_root;
-    isqrt #(.W(48)) u_sqrt (.clk(clk), .resetn(resetn), .start(s_start),
-        .radicand({16'd0, d_num[31:0]}), .busy(), .done(s_done), .root(s_root));
+    wire        s_done;  wire [15:0] s_root;       // mean-square <= 2^30 -> 32-bit radicand
+    isqrt #(.W(32)) u_sqrt (.clk(clk), .resetn(resetn), .start(s_start),
+        .radicand(d_num[31:0]), .busy(), .done(s_done), .root(s_root));
 
     // scale pass, stage 1: t1 = sat16( x*scale >> FRAC )  (registered into t1_r)
     wire signed [31:0] xs    = $signed(xreg[fi[4:0]]) * $signed(scale_q[15:0]);
@@ -86,7 +86,7 @@ module norm #(
                 end
                 S_SQRT: if (s_done) begin
                     d_num <= 48'd1 << (2*FRAC);
-                    d_den <= {24'd0, ((s_root < 1) ? 24'd1 : s_root)};
+                    d_den <= {32'd0, ((s_root < 1) ? 16'd1 : s_root)};
                     d_start <= 1; st <= S_DIV2;
                 end
                 S_DIV2: if (d_done) begin
