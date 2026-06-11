@@ -32,7 +32,7 @@ module tb_matvec;
     );
 
     wire [11:0] w_addr;
-    wire signed [15:0] w_rdata;
+    wire [383:0] w_rdata;                                      // 24 lanes x 16-bit
     wrom u_wrom (.sel(3'd0), .addr(w_addr), .wdata(w_rdata));  // sel=WQ
 
     wire mv_busy, mv_done;
@@ -46,10 +46,9 @@ module tb_matvec;
         .busy(mv_busy), .done(mv_done)
     );
 
-    // debug: print acc at each S_WB (st==3), and the done pulse
-    always @(posedge clk) if (!load && u_mv.st == 2'd3)
-        $display("[%0t] WB o=%0d acc=%0d sat=%0d",
-                 $time, u_mv.o, u_mv.acc, $signed(u_mv.sat));
+    // debug: report each writeback row and the done pulse
+    always @(posedge clk) if (!load && u_mv.st == 2'd3 && u_mv.wb_row < u_mv.out_dim)
+        $display("[%0t] WB row=%0d sat=%0d", $time, u_mv.wb_row, $signed(u_mv.wb_sat));
     always @(posedge clk) if (mv_done) $display("[%0t] DONE", $time);
 
     integer k, errors;

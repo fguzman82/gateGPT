@@ -24,6 +24,27 @@ def write_hex(name, arr2d):
     return flat.size
 
 
+def write_tiled_hex(name, W, lanes=24):
+    """Wide weight ROM for the LANES-parallel matvec tile. W has shape (out_dim, in_dim).
+    Output rows are split into tiles of LANES rows; each ROM word holds the LANES weights
+    for one input index i across the tile's rows (lane = row within the tile). A word is
+    addressed by tile*in_dim + i and packed lane-0 in the least-significant 16 bits, so
+    w_rdata[lane*16 +: 16] selects that lane. Tiles past out_dim are zero-padded."""
+    W = np.asarray(W)
+    out_dim, in_dim = W.shape
+    tiles = (out_dim + lanes - 1) // lanes
+    with open(os.path.join(GEN, name), "w") as f:
+        for t in range(tiles):
+            for i in range(in_dim):
+                word = ""
+                for lane in reversed(range(lanes)):     # lane 23 = MSB ... lane 0 = LSB
+                    o = t * lanes + lane
+                    val = int(W[o, i]) if o < out_dim else 0
+                    word += f"{val & 0xFFFF:04x}"
+                f.write(word + "\n")
+    return tiles * in_dim
+
+
 def main():
     os.makedirs(GEN, exist_ok=True)
     cfg = ModelConfig()
@@ -40,6 +61,16 @@ def main():
     sizes["fc1"] = write_hex("fc1.hex", m.fc1)                  # 96 x 24
     sizes["fc2"] = write_hex("fc2.hex", m.fc2)                  # 24 x 96
     sizes["lm"] = write_hex("lm_head.hex", m.lm)               # 27 x 24
+
+    # wide tiled weight ROMs for the 24-lane parallel matvec (one word = 24 weights)
+    write_tiled_hex("wq_t.hex", m.wq)
+    write_tiled_hex("wk_t.hex", m.wk)
+    write_tiled_hex("wv_t.hex", m.wv)
+    write_tiled_hex("wo_t.hex", m.wo)
+    write_tiled_hex("fc1_t.hex", m.fc1)
+    write_tiled_hex("fc2_t.hex", m.fc2)
+    write_tiled_hex("lm_t.hex", m.lm)
+
     sizes["g1"] = write_hex("gain1.hex", m.g1.reshape(1, -1))
     sizes["g2"] = write_hex("gain2.hex", m.g2.reshape(1, -1))
     sizes["gf"] = write_hex("gainf.hex", m.gf.reshape(1, -1))

@@ -68,7 +68,7 @@ module microgpt_core (
     grom u_grom (.sel(gsel), .addr(g_addr), .gdata(g_rdata));
 
     wire [9:0] mv_ra, mv_wa; wire mv_we; wire signed [15:0] mv_wd; wire mv_busy, mv_done;
-    wire [11:0] w_addr; wire signed [15:0] w_rdata;
+    wire [11:0] w_addr; wire [384-1:0] w_rdata;   // 24 lanes x 16-bit weight bus
     matvec u_mv (.clk(clk), .resetn(resetn), .start(mv_go),
         .wsel(wsel[2:0]), .in_dim(in_dim), .out_dim(out_dim),
         .act_base(a_base), .dst_base(mv_dst), .descale(descale),
