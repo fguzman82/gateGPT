@@ -21,7 +21,7 @@ module tb_attn;
 
     wire a_busy, a_done;
     attn #(.N_EMBED(24), .N_HEAD(4), .HEAD_DIM(6), .BLOCK(16), .FRAC(11)) u_attn (
-        .clk(clk), .resetn(resetn), .start(start), .attn_scale(16'sd836),
+        .clk(clk), .resetn(resetn), .start(start), .attn_scale(16'sd836), .ctx_len(5'd16),
         .q_base(QB), .k_base(KB), .v_base(VB), .o_base(OB),
         .v_raddr(a_raddr), .v_rdata(v_rdata),
         .v_we(a_we), .v_waddr(a_waddr), .v_wdata(a_wdata),

@@ -1,14 +1,16 @@
 // Independent microGPT inference core: a microcode-ROM sequencer driving modular
-// datapath actuators (no hand-coded per-stage state machine). The program ROM
-// (generated/ucode.hex, from tools/ucode_asm.py) holds the transformer schedule
-// as macro-ops; the sequencer fetches one per step, starts the matching actuator,
-// and waits for done. Recomputes the full 16-position context each call (no KV
-// cache shared across tokens), bit-exact with tools/fixedpoint.QModel.
+// datapath actuators. The program ROM (generated/ucode.hex) holds the schedule as
+// macro-ops; the sequencer fetches one per step, starts the matching actuator, waits
+// for done. INCREMENTAL decoding with a persistent KV cache: each call processes ONE
+// new token at position pos_in (token_in), writing its K/V into the cache slot KC[pos]/
+// VC[pos] (use_pos), and attends over positions 0..pos_in. The KC/VC cache lives in
+// vmem and survives across calls. Bit-exact with tools/fixedpoint.QModel.logits_last.
 module microgpt_core (
     input  wire        clk,
     input  wire        resetn,
     input  wire        start,
-    input  wire [16*5-1:0] ctx_flat,         // 16 context tokens, 5 bits each
+    input  wire [4:0]  token_in,             // new token at this position
+    input  wire [4:0]  pos_in,               // absolute position (0..BLOCK-1)
     input  wire        sample_mode,
     input  wire signed [15:0] inv_temp,      // (1/temperature) in Q5.11
     input  wire [31:0] rng_in,
@@ -32,12 +34,15 @@ module microgpt_core (
     wire [6:0]  out_dim = instr[21:15];
     wire [4:0]  descale = instr[26:22];
     wire [1:0]  gsel    = instr[28:27];
-    wire [3:0]  ipos    = instr[32:29];
     wire [9:0]  a_base  = instr[42:33];
     wire [9:0]  b_base  = instr[53:44];
     wire [9:0]  d_base  = instr[64:55];
+    wire        use_pos = instr[66];
 
-    wire [4:0]  ctx_tok = ctx_flat[ipos*5 +: 5];
+    // latched per-token inputs
+    reg [4:0] tok_r, pos_r;
+    wire [9:0] pos_off = pos_r * N_EMBED;                    // cache slot offset
+    wire [9:0] mv_dst  = use_pos ? (d_base + pos_off) : d_base;
 
     // ---------------- shared vmem ----------------
     wire [9:0]  v_raddr;
@@ -49,12 +54,11 @@ module microgpt_core (
 
     // ---------------- actuators ----------------
     reg  em_go, no_go, mv_go, at_go, vo_go, sp_go;
-    // embed
     wire em_we; wire [9:0] em_wa; wire signed [15:0] em_wd; wire em_busy, em_done;
     embed #(.N_EMBED(N_EMBED)) u_embed (.clk(clk), .resetn(resetn), .start(em_go),
-        .token(ctx_tok), .pos(ipos), .dst_base(d_base),
+        .token(tok_r), .pos(pos_r[3:0]), .dst_base(d_base),
         .v_we(em_we), .v_waddr(em_wa), .v_wdata(em_wd), .busy(em_busy), .done(em_done));
-    // norm
+
     wire [9:0] no_ra, no_wa; wire no_we; wire signed [15:0] no_wd; wire no_busy, no_done;
     wire [5:0] g_addr; wire signed [15:0] g_rdata;
     norm #(.N(N_EMBED), .FRAC(FRAC_BITS)) u_norm (.clk(clk), .resetn(resetn), .start(no_go),
@@ -62,29 +66,30 @@ module microgpt_core (
         .v_raddr(no_ra), .v_rdata(v_rdata), .v_we(no_we), .v_waddr(no_wa), .v_wdata(no_wd),
         .g_addr(g_addr), .g_rdata(g_rdata), .busy(no_busy), .done(no_done));
     grom u_grom (.sel(gsel), .addr(g_addr), .gdata(g_rdata));
-    // matvec
+
     wire [9:0] mv_ra, mv_wa; wire mv_we; wire signed [15:0] mv_wd; wire mv_busy, mv_done;
     wire [11:0] w_addr; wire signed [15:0] w_rdata;
     matvec u_mv (.clk(clk), .resetn(resetn), .start(mv_go),
         .wsel(wsel[2:0]), .in_dim(in_dim), .out_dim(out_dim),
-        .act_base(a_base), .dst_base(d_base), .descale(descale),
+        .act_base(a_base), .dst_base(mv_dst), .descale(descale),
         .v_raddr(mv_ra), .v_rdata(v_rdata), .v_we(mv_we), .v_waddr(mv_wa), .v_wdata(mv_wd),
         .w_addr(w_addr), .w_rdata(w_rdata), .busy(mv_busy), .done(mv_done));
     wrom u_wrom (.sel(wsel[2:0]), .addr(w_addr), .wdata(w_rdata));
-    // attention (fixed regions)
+
     wire [9:0] at_ra, at_wa; wire at_we; wire signed [15:0] at_wd; wire at_busy, at_done;
     attn #(.N_EMBED(N_EMBED), .N_HEAD(N_HEAD), .HEAD_DIM(HEAD_DIM), .BLOCK(BLOCK), .FRAC(FRAC_BITS))
       u_attn (.clk(clk), .resetn(resetn), .start(at_go), .attn_scale(ATTN_SCALE),
+        .ctx_len(pos_r + 5'd1),
         .q_base(A_QV), .k_base(A_KC), .v_base(A_VC), .o_base(A_AO),
         .v_raddr(at_ra), .v_rdata(v_rdata), .v_we(at_we), .v_waddr(at_wa), .v_wdata(at_wd),
         .busy(at_busy), .done(at_done));
-    // vecop (ADD / RELU)
+
     wire [9:0] vo_ra, vo_wa; wire vo_we; wire signed [15:0] vo_wd; wire vo_busy, vo_done;
     vecop u_vecop (.clk(clk), .resetn(resetn), .start(vo_go), .op(op == OP_RELU),
         .a_base(a_base), .b_base(b_base), .dst_base(d_base), .cnt(out_dim),
         .v_raddr(vo_ra), .v_rdata(v_rdata), .v_we(vo_we), .v_waddr(vo_wa), .v_wdata(vo_wd),
         .busy(vo_busy), .done(vo_done));
-    // sampler
+
     wire [9:0] sp_ra; wire [4:0] sp_tok; wire [31:0] sp_rng; wire sp_busy, sp_done;
     sampler #(.VOCAB(VOCAB), .FRAC(FRAC_BITS)) u_samp (.clk(clk), .resetn(resetn), .start(sp_go),
         .sample_mode(sample_mode), .inv_temp(inv_temp), .rng_in(rng_in), .lm_base(A_LOG),
@@ -122,7 +127,9 @@ module microgpt_core (
             done <= 0;
             em_go<=0; no_go<=0; mv_go<=0; at_go<=0; vo_go<=0; sp_go<=0;
             case (q)
-                Q_IDLE: if (start) begin busy <= 1; pc <= 0; q <= Q_EXEC; end
+                Q_IDLE: if (start) begin
+                    busy <= 1; pc <= 0; tok_r <= token_in; pos_r <= pos_in; q <= Q_EXEC;
+                end
                 Q_EXEC: begin
                     case (op)
                         OP_EMBED:  em_go <= 1;
@@ -132,7 +139,7 @@ module microgpt_core (
                         OP_VADD:   vo_go <= 1;
                         OP_RELU:   vo_go <= 1;
                         OP_SAMPLE: sp_go <= 1;
-                        default: ;                     // OP_HALT / OP_NOP
+                        default: ;
                     endcase
                     if (op == OP_HALT) begin busy <= 0; done <= 1; q <= Q_IDLE; end
                     else q <= Q_WAIT;

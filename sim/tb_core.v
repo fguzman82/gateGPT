@@ -1,11 +1,12 @@
-// End-to-end core test: run the autoregressive generation loop and compare the
-// produced token sequence to the Python golden (greedy and sampled).
+// End-to-end core test: run the incremental generation loop (one token per core call
+// at a growing absolute position, with the persistent KV cache) and compare the token
+// sequence to the Python golden (greedy and sampled).
 `timescale 1ns/1ps
 module tb_core;
     reg clk = 0, resetn = 0, start = 0;
     always #5 clk = ~clk;
 
-    reg [79:0]  ctx;
+    reg [4:0]   token_in, pos_in;
     reg         smode;
     reg signed [15:0] inv_temp;
     reg [31:0]  rng_in;
@@ -14,7 +15,8 @@ module tb_core;
     wire [31:0] rng_out;
 
     microgpt_core u_core (.clk(clk), .resetn(resetn), .start(start),
-        .ctx_flat(ctx), .sample_mode(smode), .inv_temp(inv_temp), .rng_in(rng_in),
+        .token_in(token_in), .pos_in(pos_in),
+        .sample_mode(smode), .inv_temp(inv_temp), .rng_in(rng_in),
         .busy(busy), .done(done), .next_token(next_token), .rng_out(rng_out));
 
     integer step, errors;
@@ -32,20 +34,20 @@ module tb_core;
         end
     end
 
-    // expected sequences
-    reg [4:0] exp_greedy [0:5];
+    // expected sequences (absolute-position model): greedy "alaya", sampled "rosphod"
+    reg [4:0] exp_greedy [0:4];
     reg [4:0] exp_samp   [0:6];
 
     task run_gen(input mode, input [31:0] seed, input signed [15:0] itemp);
         begin
-            ctx = 80'd0; rng_in = seed; smode = mode; inv_temp = itemp; slen = 0;
+            token_in = 0; pos_in = 0; rng_in = seed; smode = mode; inv_temp = itemp; slen = 0;
             for (step = 0; step < 16; step = step + 1) begin
                 @(negedge clk); start = 1; @(negedge clk); start = 0;
                 wait (done); @(posedge clk); #1;
                 if (next_token == 0) step = 100;          // stop on delimiter
                 else begin
                     seq[slen] = next_token; slen = slen + 1;
-                    ctx = {next_token, ctx[79:5]};
+                    token_in = next_token; pos_in = pos_in + 1;   // advance position
                     rng_in = rng_out;
                 end
             end
@@ -54,15 +56,15 @@ module tb_core;
 
     integer k;
     initial begin
-        exp_greedy[0]=1; exp_greedy[1]=12; exp_greedy[2]=5; exp_greedy[3]=24; exp_greedy[4]=1; exp_greedy[5]=14;
-        exp_samp[0]=19; exp_samp[1]=1; exp_samp[2]=1; exp_samp[3]=14; exp_samp[4]=9; exp_samp[5]=1; exp_samp[6]=8;
+        exp_greedy[0]=1; exp_greedy[1]=12; exp_greedy[2]=1; exp_greedy[3]=25; exp_greedy[4]=1;
+        exp_samp[0]=18; exp_samp[1]=15; exp_samp[2]=19; exp_samp[3]=16; exp_samp[4]=8; exp_samp[5]=15; exp_samp[6]=4;
         errors = 0;
         repeat (6) @(posedge clk); resetn = 1; @(posedge clk);
 
         run_gen(1'b0, 32'd0, 16'sd0);     // greedy
         $write("greedy tokens:"); for (k=0;k<slen;k=k+1) $write(" %0d", seq[k]); $write("\n");
-        if (slen != 6) begin $display("GREEDY LEN FAIL %0d", slen); errors=errors+1; end
-        else for (k=0;k<6;k=k+1) if (seq[k]!==exp_greedy[k]) begin
+        if (slen != 5) begin $display("GREEDY LEN FAIL %0d", slen); errors=errors+1; end
+        else for (k=0;k<5;k=k+1) if (seq[k]!==exp_greedy[k]) begin
             $display("GREEDY MISMATCH %0d got %0d exp %0d", k, seq[k], exp_greedy[k]); errors=errors+1; end
 
         run_gen(1'b1, 32'd2, 16'sd2926);  // sampled seed=2 T=0.7

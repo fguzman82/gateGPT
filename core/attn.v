@@ -15,6 +15,7 @@ module attn #(
     input  wire        resetn,
     input  wire        start,
     input  wire signed [15:0] attn_scale,
+    input  wire [4:0]  ctx_len,        // number of valid context positions (1..BLOCK)
     input  wire [9:0]  q_base,
     input  wire [9:0]  k_base,
     input  wire [9:0]  v_base,
@@ -119,7 +120,7 @@ module attn #(
                     if (dot_vld) begin
                         score[dot_s[3:0]] <= scale_score(dot_raw);
                         if (scale_score(dot_raw) > mmax) mmax <= scale_score(dot_raw);
-                        if (dot_s == BLOCK - 1) begin s <= 0; sum_e <= 0; feeding <= 1; ph <= P_EXP; end
+                        if (dot_s == ctx_len - 1) begin s <= 0; sum_e <= 0; feeding <= 1; ph <= P_EXP; end
                     end
                     // stage 1: MAC q.k; register the completed dot product
                     if (vld) begin
@@ -131,7 +132,7 @@ module attn #(
                     if (feeding) begin
                         if (d == HEAD_DIM - 1) begin
                             d <= 0;
-                            if (s == BLOCK - 1) feeding <= 0;
+                            if (s == ctx_len - 1) feeding <= 0;
                             else begin s <= s + 1; soff <= soff + N_EMBED; end
                         end else d <= d + 1;
                     end
@@ -140,22 +141,22 @@ module attn #(
                     if (vld) begin                           // exp_unit output -> accumulate
                         ev[s_d[3:0]] <= eo;
                         sum_e <= sum_e + {16'd0, eo};
-                        if (s_d == BLOCK - 1) begin
+                        if (s_d == ctx_len - 1) begin
                             d <= 0; s <= 0; soff <= 0; acc <= 0; feeding <= 1; ph <= P_WSUM;
                         end
                     end
                     if (feeding) begin
-                        if (s == BLOCK - 1) feeding <= 0;
+                        if (s == ctx_len - 1) feeding <= 0;
                         else s <= s + 1;
                     end
                 end
                 P_WSUM: begin
                     if (vld) begin
                         acc <= vacc;
-                        if (s_d == BLOCK - 1) begin d_start <= 1; feeding <= 0; ph <= P_WDIV; end
+                        if (s_d == ctx_len - 1) begin d_start <= 1; feeding <= 0; ph <= P_WDIV; end
                     end
                     if (feeding) begin
-                        if (s == BLOCK - 1) feeding <= 0;
+                        if (s == ctx_len - 1) feeding <= 0;
                         else begin s <= s + 1; soff <= soff + N_EMBED; end
                     end
                 end
