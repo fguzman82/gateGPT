@@ -56,3 +56,8 @@ sim/*_sim
 # Python
 __pycache__/
 *.pyc
+
+# stray build artifacts
+netlist.lst
+fuseRelaunch.cmd
+*.lst
