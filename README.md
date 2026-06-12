@@ -25,24 +25,33 @@ a hand-coded monolithic state machine. A small program ROM (`generated/ucode.hex
 step, starts the matching actuator, and waits for `done`. Actuators share a true dual-port
 activation scratchpad (`vmem`, one Block RAM) that also holds the persistent KV cache.
 
-```
-            ┌──────────────────────────────────────────────────────────┐
- token,pos ─►│  micro-PC ── fetch ──► program ROM (ucode.hex)           │
-            │      │                       │ macro-op (op, dims, addrs) │
-            │      │                       ▼                            │
-            │      │            ┌──── decode / actuator select ────┐   │
-            │      ▼            ▼        ▼        ▼        ▼        ▼   │
-            │   embed       norm     matvec     attn    vecop   sampler│
-            │      │            │        │        │        │        │  │
-            │      └──────┬─────┴────┬───┴───┬────┴────┬───┴────────┘  │
-            │       portA │    portB │  weights (wrom) │  gains (grom) │
-            │             ▼          ▼                 │               │
-            │        ┌─────────────────────┐           │               │
-            │        │  vmem — dual-port    │◄──────────┘  next_token ──►
-            │        │  BRAM scratchpad     │              rng_out
-            │        │  (working + KV cache)│
-            │        └─────────────────────┘
-            └──────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    IN([token_in, pos_in]) --> PC
+
+    subgraph SEQ["microcode sequencer"]
+        direction LR
+        PC["micro-PC"] --> UROM["ucode ROM<br/>(macro-ops)"] --> DEC["decode /<br/>actuator select"]
+    end
+
+    DEC -->|start one| ACT
+
+    subgraph ACT["datapath actuators — one active per step"]
+        direction LR
+        EMB["embed"]
+        NRM["norm<br/>(RMSNorm)"]
+        MV["matvec<br/>24x2 MAC tile"]
+        ATT["attn<br/>multi-head"]
+        VEC["vecop<br/>add / ReLU"]
+        SMP["sampler<br/>softmax + LCG"]
+    end
+
+    WROM[("weight ROM<br/>(wrom)")] --> MV
+    GROM[("gain ROM<br/>(grom)")] --> NRM
+
+    ACT <-->|"port A + port B"| VMEM[("vmem — true dual-port BRAM<br/>working set + persistent KV cache")]
+
+    SMP --> OUT([next_token, rng_out])
 ```
 
 Datapath actuators (`core/`):
