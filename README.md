@@ -95,8 +95,27 @@ at seed 2, T=0.7) and verified in the iSim oracle. Throughput is per-token at th
 | Average over a full name | 1,321 | ~60,600 |
 | Longest-context token | 1,488 | ~53,800 |
 
-Resource footprint of the final board build: **15.5k LUT (22%), 5.3k slices (30%), 62 DSP
-(96%), 1 Block RAM**, on the XC5VLX110T at 80 MHz (DCM CLKFX ×4/5 from the 100 MHz oscillator).
+### FPGA resource utilization
+
+Full board (inference core + LCD driver + rotary control + tok/s meter + DCM) on the
+**XC5VLX110T-1 FF1136**, post-PAR at 80 MHz (min period 12.458 ns, 0 timing errors):
+
+| Resource | Used | Available | Util. |
+|---|---:|---:|---:|
+| Slice LUTs | 16,548 | 69,120 | 23% |
+| &nbsp;&nbsp;— as logic | 16,427 | 69,120 | 23% |
+| &nbsp;&nbsp;— as distributed RAM | 56 | 17,920 | <1% |
+| Slice Registers (FF) | 5,530 | 69,120 | 8% |
+| Occupied Slices | 5,362 | 17,280 | 31% |
+| **DSP48E** | **62** | **64** | **96%** |
+| Block RAM (RAMB36) | 2 | 148 | 1% |
+| BUFG | 2 | 32 | 6% |
+| DCM_ADV | 1 | 12 | 8% |
+| Bonded IOBs | 29 | 640 | 5% |
+
+**DSP is the binding resource** — the 24-lane × 2-column matvec tile uses 48 of the 62. Everything
+else is comfortable (≤31%). The activation scratchpad + KV cache fit in a single dual-port Block RAM;
+the weight/embedding/microcode ROMs are LUT-baked constants (see the bring-up note below).
 
 ---
 
