@@ -36,6 +36,9 @@ module matvec #(
 );
     localparam [1:0] S_IDLE=2'd0, S_RUN=2'd1, S_DRAIN=2'd2, S_WB=2'd3;
     localparam integer HW = LANES*16;           // half-word boundary (col 2j+1 offset)
+    // sized copy of LANES for arithmetic: a bit-select of the integer parameter (LANES[6:0])
+    // synthesizes wrong in XST 14.7 (it zeroed obase -> multi-tile matmuls hung on the board).
+    localparam [6:0] LANES_W = LANES;
     reg [1:0]  st;
     reg [6:0]  fi;                    // column-pair (feed) index within the current tile
     reg [6:0]  obase;                 // first output row of the current tile = tile*LANES
@@ -111,11 +114,11 @@ module matvec #(
                     else dcnt <= dcnt + 2'd1;
                 end
                 S_WB: begin                                    // write two rows per cycle
-                    if (wbi >= LANES - 7'd2) begin
-                        if (obase + LANES >= out_dim) begin    // last tile -> finished
+                    if (wbi >= LANES_W - 7'd2) begin
+                        if (obase + LANES_W >= out_dim) begin   // last tile -> finished
                             busy <= 0; done <= 1; st <= S_IDLE;
                         end else begin                         // next tile
-                            obase <= obase + LANES[6:0]; wbase <= wbase + {5'd0, (in_dim >> 1)};
+                            obase <= obase + LANES_W; wbase <= wbase + {5'd0, (in_dim >> 1)};
                             fi <= 0;
                             for (L = 0; L < LANES; L = L + 1) acc[L] <= 0;
                             feeding <= 1; st <= S_RUN;
