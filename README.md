@@ -1,6 +1,6 @@
 # gateGPT
 
-**gateGPT** is a hardware (RTL) implementation of [Andrej Karpathy's nanoGPT](https://github.com/karpathy/nanoGPT)
+**gateGPT** is a hardware (RTL) implementation of [Andrej Karpathy's microGPT](https://karpathy.github.io/2026/02/12/microgpt/)
 — a small character-level GPT — running entirely on a **Xilinx Virtex-5** FPGA (XC5VLX110T, XUPV5 /
 ML509 board, ISE 14.7, Verilog-2001), here trained to generate names. The model (one transformer
 block: RMSNorm → multi-head causal attention → MLP, in Q5.11 fixed point) executes as a
