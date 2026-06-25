@@ -1,5 +1,9 @@
 # gateGPT
 
+<video src="https://github.com/fguzman82/gateGPT/raw/main/media/gateGPT_video_final.mp4" controls muted width="100%"></video>
+
+> 📹 If the player above does not load, [watch the demo video here](media/gateGPT_video_final.mp4).
+
 **gateGPT** is a hardware (RTL) implementation of [Andrej Karpathy's microGPT](https://karpathy.github.io/2026/02/12/microgpt/)
 — a small character-level GPT — running entirely on a **Xilinx Virtex-5** FPGA (XC5VLX110T, XUPV5 /
 ML509 board, ISE 14.7, Verilog-2001), here trained to generate names. The model (one transformer
